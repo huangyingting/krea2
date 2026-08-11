@@ -14,7 +14,7 @@ from typing import Callable, Optional
 import torch
 from torch import Tensor
 
-from . import accel, blend, color_match, loaders, nodes, usdu
+from . import accel, blend, color_match, loaders, metadata, nodes, usdu
 from .imageutil import get_image_size
 from .pipeline import Krea2Models, Krea2Pipeline
 from .seedvr2 import SeedVR2Config
@@ -399,16 +399,20 @@ def run_workflow(config: WorkflowConfig | None = None,
                 prompt, cfg.negative_prompt, cfg.steps, cfg.sampler_name, cfg.cfg,
                 cfg.seed, width, height, cfg.unet_name,
             )
+            manifest = metadata.build_generation_manifest(cfg, prompt, width, height)
             paths = nodes.save_image(
                 final, cfg.output_dir, cfg.filename, cfg.subdir, cfg.extension,
                 cfg.quality, cfg.time_format, metadata=meta,
+                generation_manifest=manifest,
             )
             if cfg.save_intermediates:
                 for name, img in stages.items():
                     if img is final:
                         continue
                     nodes.save_image(img, cfg.output_dir, f"{cfg.filename}_{name}",
-                                     cfg.subdir, "png", cfg.quality, cfg.time_format)
+                                     cfg.subdir, "png", cfg.quality, cfg.time_format,
+                                     metadata=meta, generation_manifest=manifest,
+                                     image_stage=name)
 
     say(f"done: {out_w}x{out_h} in {sum(timings.values()):.1f}s")
     return WorkflowResult(

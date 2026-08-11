@@ -298,6 +298,33 @@ The standalone ColorMatch stage supports `default`, `hm`, `reinhard`, `mvgd`,
 `blend-upscale-model`, applies Lanczos sizing, and blends it with SeedVR2. Set
 either `run-color-match = false` or `run-blend = false` to bypass that module.
 
+### Image formats and reproducibility metadata
+
+The saver supports PNG, JPG/JPEG, and WebP. Every final image and optional
+intermediate contains two forms of metadata:
+
+- An A1111-compatible `parameters` record with the prompt, negative prompt,
+  steps, sampler, CFG, seed, base size, and diffusion model.
+- A versioned `krea2pipe.generation` JSON manifest with all pixel-affecting
+  settings: model identifiers and LoRAs, resolved seeds, base dimensions,
+  sampler and scheduler, USDU, ColorMatch, SeedVR2, blend, dtype, batch index,
+  image stage, output dimensions, and software versions.
+
+PNG stores these as `parameters` and `krea2pipe` text chunks. JPEG and WebP
+store the parameters in EXIF `UserComment` and the JSON manifest in EXIF
+`ImageDescription`. Read the structured manifest directly:
+
+```python
+from krea2pipe.metadata import read_generation_manifest
+
+settings = read_generation_manifest("/data/krea2/output/image.png")
+```
+
+Machine-local model-root paths are intentionally omitted; absolute checkpoint
+paths are reduced to filenames. Reproducing the same pixels therefore requires
+the same model files, application/PyTorch versions, and compatible hardware in
+addition to the embedded settings.
+
 The supplied unit keeps the `torch.compile` cache under
 `/var/cache/krea2pipe`, so it survives a reboot. It restarts after transient
 failures but stops after three failures in five minutes instead of looping on
@@ -347,6 +374,7 @@ src/krea2pipe/
   loaders.py       model-root checkpoint loading
   lora.py          LoRA weight merging
   nodes.py         resolution, arithmetic, metadata, and saving utilities
+  metadata.py      versioned image generation manifests and extraction
   imageutil.py     tensor/PIL helpers, common_upscale, tiled_scale
   upscale.py       ImageUpscaleWithModel (spandrel + tiling)
   usdu.py          UltimateSDUpscale

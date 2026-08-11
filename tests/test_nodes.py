@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from krea2pipe import blend, color_match, nodes
+from krea2pipe import blend, color_match, metadata, nodes
 
 
 # --- ResolutionSelector (node 43) ---------------------------------------------------
@@ -219,6 +219,95 @@ def test_save_image_rejects_a_subdirectory_outside_output_root(tmp_path):
             torch.rand(1, 8, 8, 3), str(tmp_path), "escape",
             subdir="../outside", extension="png",
         )
+
+
+@pytest.mark.parametrize("extension", ["png", "jpg", "webp"])
+def test_generation_manifest_round_trips_in_every_output_format(tmp_path, extension):
+    from krea2pipe.workflow import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        prompt="portable prompt",
+        unet_name="/private/models/krea2.safetensors",
+        loras=[("style-a.safetensors", 0.4), ("style-b.safetensors", 0.7)],
+        batch_size=2,
+        seed=101,
+        scheduler="simple",
+        usdu_seed=202,
+        color_match_method="mkl",
+        blend_factor=0.3,
+        extension=extension,
+    )
+    manifest = metadata.build_generation_manifest(cfg, cfg.prompt, 640, 384)
+    assert "/private/models" not in metadata.encode_manifest(manifest)
+    assert "model_root" not in metadata.encode_manifest(manifest)
+    parameters = nodes.a1111_metadata(
+        cfg.prompt, "", cfg.steps, cfg.sampler_name, cfg.cfg, cfg.seed,
+        640, 384, cfg.unet_name,
+    )
+    paths = nodes.save_image(
+        torch.rand(2, 12, 20, 3),
+        str(tmp_path),
+        f"manifest-{extension}",
+        extension=extension,
+        metadata=parameters,
+        generation_manifest=manifest,
+        image_stage="seedvr2",
+    )
+
+    for index, path in enumerate(paths):
+        restored = metadata.read_generation_manifest(path)
+        assert restored is not None
+        assert restored["schema_version"] == 1
+        assert restored["prompt"]["positive"] == "portable prompt"
+        assert restored["models"]["diffusion"] == "krea2.safetensors"
+        assert restored["models"]["loras"][1] == {
+            "name": "style-b.safetensors",
+            "strength": 0.7,
+        }
+        assert restored["base"]["seed"] == 101
+        assert restored["base"]["scheduler"] == "simple"
+        assert restored["stages"]["usdu"]["seed"] == 202
+        assert restored["stages"]["color_match"]["method"] == "mkl"
+        assert restored["stages"]["blend"]["factor"] == 0.3
+        assert restored["image"] == {
+            "stage": "seedvr2",
+            "batch_index": index,
+            "width": 20,
+            "height": 12,
+            "format": extension,
+        }
+        if extension != "png":
+            import piexif
+            import piexif.helper
+
+            exif = piexif.load(path)
+            user_comment = exif["Exif"][piexif.ExifIFD.UserComment]
+            assert piexif.helper.UserComment.load(user_comment) == parameters
+
+
+def test_png_keeps_a1111_parameters_alongside_generation_manifest(tmp_path):
+    from PIL import Image
+    from krea2pipe.workflow import WorkflowConfig
+
+    cfg = WorkflowConfig(prompt="a prompt")
+    (path,) = nodes.save_image(
+        torch.rand(1, 8, 8, 3),
+        str(tmp_path),
+        "metadata",
+        extension="png",
+        metadata="A1111 parameters",
+        generation_manifest=metadata.build_generation_manifest(cfg, cfg.prompt, 8, 8),
+    )
+    with Image.open(path) as image:
+        assert image.info["parameters"] == "A1111 parameters"
+        assert metadata.PNG_KEY in image.info
+
+
+def test_manifest_reader_returns_none_for_an_unrelated_image(tmp_path):
+    (path,) = nodes.save_image(
+        torch.rand(1, 8, 8, 3), str(tmp_path), "plain", extension="png"
+    )
+    assert metadata.read_generation_manifest(path) is None
 
 
 def test_a1111_metadata_format():

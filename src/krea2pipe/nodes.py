@@ -8,12 +8,15 @@ import math
 import operator as op
 import os
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import Tensor
 
+from . import metadata as image_metadata
 from .blend import image_blend
 from .color_match import color_match
 from .imageutil import tensor_to_pil
@@ -134,8 +137,11 @@ def save_image(
     time_format: str = "%Y-%m-%d-%H%M%S",
     metadata: str | None = None,
     counter: int = 0,
+    *,
+    generation_manifest: Mapping[str, Any] | None = None,
+    image_stage: str = "final",
 ) -> list[str]:
-    """Save a BHWC image batch with token substitution and metadata."""
+    """Save a BHWC image batch with portable parameters and generation metadata."""
     name = filename
     name = name.replace("%date", datetime.now().strftime("%Y-%m-%d"))
     name = name.replace("%time", datetime.now().strftime(time_format))
@@ -165,6 +171,18 @@ def save_image(
             path = str(target_dir / f"{basename}{suffix}_{n:02d}.{extension}")
             n += 1
         img = tensor_to_pil(image, i)
+        manifest_text = None
+        if generation_manifest is not None:
+            manifest_text = image_metadata.encode_manifest(
+                image_metadata.manifest_for_image(
+                    generation_manifest,
+                    stage=image_stage,
+                    batch_index=i,
+                    width=image.shape[2],
+                    height=image.shape[1],
+                    image_format=extension,
+                )
+            )
         fd, temporary = tempfile.mkstemp(
             prefix=f".{basename}-", suffix=f".{extension}", dir=target_dir
         )
@@ -176,16 +194,26 @@ def save_image(
                 info = PngInfo()
                 if metadata:
                     info.add_text("parameters", metadata)
+                if manifest_text:
+                    info.add_itxt(image_metadata.PNG_KEY, manifest_text, zip=True)
                 img.save(temporary, format="PNG", pnginfo=info, optimize=True)
             else:
                 image_format = "JPEG" if extension in {"jpg", "jpeg"} else extension.upper()
                 img.save(temporary, format=image_format, optimize=True, quality=quality)
-                if metadata:
+                if metadata or manifest_text:
                     import piexif
                     import piexif.helper
 
-                    exif = {"Exif": {piexif.ExifIFD.UserComment:
-                                     piexif.helper.UserComment.dump(metadata, encoding="unicode")}}
+                    exif: dict[str, dict[int, bytes]] = {}
+                    if manifest_text:
+                        exif["0th"] = {
+                            piexif.ImageIFD.ImageDescription: manifest_text.encode("utf-8")
+                        }
+                    if metadata:
+                        exif["Exif"] = {
+                            piexif.ExifIFD.UserComment:
+                                piexif.helper.UserComment.dump(metadata, encoding="unicode")
+                        }
                     piexif.insert(piexif.dump(exif), temporary)
             with open(temporary, "rb") as fh:
                 os.fsync(fh.fileno())
