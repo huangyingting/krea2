@@ -186,6 +186,35 @@ batch-1 DiT numerics. The saver writes `_00`, `_01`, … suffixes.
 The batch-4 result was verified as `(4, 4096, 4096, 3)`. Every image is encoded
 as an independent one-frame VAE input and receives tile diffusion.
 
+### Corrected ComfyUI comparison
+
+The batch-2 reference must opt into independent image VAE handling; otherwise
+the 3D VAE interprets the image batch as video time and only one image reaches
+USDU diffusion. With that correction, identical fp16 models, SDPA, no block
+swap, and the same 1248² → 2496² → 4096² workload:
+
+| Stage | krea2pipe warm | ComfyUI corrected | Difference |
+| --- | ---: | ---: | ---: |
+| text encode | 1.3 s | 1.0 s | +0.3 s |
+| Krea 2 sample + VAE decode | 13.7 s | 16.9 s | −3.2 s |
+| USDU | 27.4 s | 29.7 s | −2.3 s |
+| ColorMatch | 2.2 s | 2.2 s | 0.0 s |
+| SeedVR2 | 38.5 s | 44.2 s | −5.7 s |
+| model upscale + Lanczos + blend | 13.8 s | 21.6 s | −7.8 s |
+| **pipeline total** | **96.9 s** | **115.6 s** | **−18.7 s** |
+| **peak VRAM** | **47.6 GB** | **56.8 GB** | **−9.2 GB** |
+
+krea2pipe is 16.2% faster for equivalent batch-2 work. Its measured 97.4 s
+per prompt also includes 0.5 s of JPEG writing; reference image writes occur
+outside its timers. ComfyUI loads the Krea 2 checkpoints before its timers, so
+cold-start totals are not directly comparable.
+
+The only slower warm stage is text encoding by 0.3 s. Keeping the 4B Qwen
+encoder permanently on the GPU reduces a resident encode from 1.3 s to 0.04 s,
+but consumes another 7.57 GB throughout the remaining pipeline for only about
+1.3% end-to-end improvement. The default therefore releases it to preserve
+batch headroom. No parity-safe GPU stage showed a remaining performance gap.
+
 ### Where the time went
 
 Baseline official SeedVR inference took **88 s / 62.8 GB**. Five optimizations
