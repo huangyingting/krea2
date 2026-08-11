@@ -59,6 +59,8 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["sampler"] == "euler_ancestral"
     assert generated["log-level"] == "INFO"
     assert "log-file = " in file.read_text()
+    assert generated["prompt-count"] == 1
+    assert "# theme = " in file.read_text()
     from krea2pipe.workflow import WorkflowConfig
 
     assert generated["model-root"] == WorkflowConfig().model_root
@@ -162,6 +164,61 @@ def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkey
     assert rendered[0].seedvr2.seed == (
         cfg.seedvr2.seed + prompt.seed_offset
     ) & cli.MAX_SEEDVR2
+
+
+def test_theme_mode_resumes_with_saved_seeds(tmp_path, monkeypatch):
+    from krea2pipe.seedvr2 import SeedVR2Config
+    from krea2pipe.workflow import WorkflowConfig
+
+    expanded = []
+    rendered = []
+    monkeypatch.setattr(
+        cli,
+        "expand_theme",
+        lambda _cfg, theme, seed: expanded.append((theme, seed)) or f"prompt {seed}",
+    )
+    monkeypatch.setattr(
+        cli,
+        "_render",
+        lambda cfg: rendered.append(cfg) or SimpleNamespace(paths=["image.jpg"]),
+    )
+    cfg = WorkflowConfig(
+        output_dir=str(tmp_path),
+        seed=100,
+        usdu_seed=200,
+        seedvr2=SeedVR2Config(seed=300),
+    )
+
+    assert cli._render_theme(cfg, "quiet forest", 2) == 2
+    assert [item[1] for item in expanded] == [100, 101]
+    assert [item.prompt_index for item in rendered] == [0, 1]
+    assert rendered[1].prompt_theme == "quiet forest"
+    assert rendered[1].prompt_seed == 101
+    assert rendered[1].seed == 101
+    assert rendered[1].usdu_seed == 201
+    assert rendered[1].seedvr2.seed == 301
+
+    resumed = WorkflowConfig(
+        output_dir=str(tmp_path),
+        seed=999,
+        usdu_seed=999,
+        seedvr2=SeedVR2Config(seed=999),
+    )
+    assert cli._render_theme(resumed, "quiet forest", 3) == 1
+    assert rendered[-1].prompt_index == 2
+    assert rendered[-1].seed == 102
+    assert rendered[-1].usdu_seed == 202
+    assert rendered[-1].seedvr2.seed == 302
+
+
+def test_theme_cli_rejects_conflicting_prompt_sources():
+    with pytest.raises(SystemExit, match="do not combine"):
+        main(["--theme", "forest", "--prompt", "fox"])
+
+
+def test_prompt_count_requires_theme():
+    with pytest.raises(SystemExit, match="only valid with theme"):
+        main(["--prompt-count", "2"])
 
 
 def test_toml_supports_multiple_loras_and_usdu_sampling(tmp_path):

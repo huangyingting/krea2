@@ -35,6 +35,7 @@ _TEMPLATE_HIDE = {"lora_name", "lora_strength"}
 _PLACEHOLDERS: dict[str, Any] = {
     "source": "/data/krea2/prompts",
     "prompt": "A description of the image to generate",
+    "theme": "A visual theme for Qwen to expand into varied prompts",
     "width": 1248,
     "height": 1248,
     "log_file": "/data/krea2/logs/krea2pipe.log",

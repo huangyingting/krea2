@@ -81,3 +81,42 @@ def test_output_lock_rejects_a_concurrent_renderer(tmp_path):
     # Releasing the first lock makes the output directory available again.
     with batch.OutputLock(tmp_path):
         pass
+
+
+def test_theme_progress_persists_index_and_original_seeds(tmp_path):
+    seeds = {"base": 11, "usdu": 22, "seedvr2": 33}
+    progress = batch.ThemeProgress(tmp_path, "calm ocean", seeds)
+    assert progress.next_index == 0
+    assert progress.seeds == seeds
+    progress.mark_completed(0)
+    progress.mark_completed(1)
+
+    resumed = batch.ThemeProgress(
+        tmp_path,
+        "calm ocean",
+        {"base": 999, "usdu": 999, "seedvr2": 999},
+    )
+    assert resumed.next_index == 2
+    assert resumed.seeds == seeds
+
+
+def test_theme_progress_tracks_themes_independently(tmp_path):
+    first = batch.ThemeProgress(
+        tmp_path, "ocean", {"base": 1, "usdu": 2, "seedvr2": 3}
+    )
+    first.mark_completed(0)
+    second = batch.ThemeProgress(
+        tmp_path, "forest", {"base": 4, "usdu": 5, "seedvr2": 6}
+    )
+    assert second.next_index == 0
+    assert batch.ThemeProgress(
+        tmp_path, "ocean", {"base": 7, "usdu": 8, "seedvr2": 9}
+    ).next_index == 1
+
+
+def test_theme_progress_rejects_out_of_order_completion(tmp_path):
+    progress = batch.ThemeProgress(
+        tmp_path, "theme", {"base": 1, "usdu": 2, "seedvr2": 3}
+    )
+    with pytest.raises(ValueError, match="expected 0"):
+        progress.mark_completed(1)

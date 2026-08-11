@@ -227,6 +227,9 @@ def test_generation_manifest_round_trips_in_every_output_format(tmp_path, extens
 
     cfg = WorkflowConfig(
         prompt="portable prompt",
+        prompt_theme="future city",
+        prompt_index=7,
+        prompt_seed=108,
         unet_name="/private/models/krea2.safetensors",
         loras=[("style-a.safetensors", 0.4), ("style-b.safetensors", 0.7)],
         batch_size=2,
@@ -259,6 +262,9 @@ def test_generation_manifest_round_trips_in_every_output_format(tmp_path, extens
         assert restored is not None
         assert restored["schema_version"] == 1
         assert restored["prompt"]["positive"] == "portable prompt"
+        assert restored["prompt"]["expansion"]["theme"] == "future city"
+        assert restored["prompt"]["expansion"]["index"] == 7
+        assert restored["prompt"]["expansion"]["seed"] == 108
         assert restored["models"]["diffusion"] == "krea2.safetensors"
         assert restored["models"]["loras"][1] == {
             "name": "style-b.safetensors",

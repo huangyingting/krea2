@@ -87,6 +87,10 @@ class Krea2Pipeline:
         """``CLIPTextEncode`` -> (1, seq, txtlayers*txtdim) conditioning."""
         return self.text_encoder.encode(prompt)
 
+    def expand_theme(self, theme: str, seed: int) -> str:
+        """Generate one image prompt with the same resident Qwen model used for encoding."""
+        return self.text_encoder.generate_prompt(theme, seed)
+
     @staticmethod
     def empty_latent(width: int, height: int, batch_size: int = 1) -> Tensor:
         """``EmptyLatentImage`` (+ ``fix_empty_latent_channels`` -> 16 channels)."""

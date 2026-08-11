@@ -19,6 +19,10 @@
 # a single prompt (default: built-in demo prompt 'A moody cinematic portrait of a red
 # fox '...)
 # prompt = "A description of the image to generate"
+# use resident Qwen to expand this theme into image prompts
+# theme = "A visual theme for Qwen to expand into varied prompts"
+# theme prompts to generate; 0 runs continuously
+prompt-count = 1
 # after finishing, keep rescanning FILE_OR_DIR every SECONDS for new lines instead of
 # exiting (for running as a service)
 watch = 0

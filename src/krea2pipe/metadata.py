@@ -11,6 +11,7 @@ import torch
 from PIL import Image
 
 from . import __version__
+from .prompting import EXPANSION_SOURCE
 
 if TYPE_CHECKING:
     from .workflow import WorkflowConfig
@@ -34,6 +35,17 @@ def build_generation_manifest(
 ) -> dict[str, Any]:
     """Capture all settings that affect generated pixels in a JSON-safe mapping."""
     seedvr2 = cfg.seedvr2
+    prompt_metadata: dict[str, Any] = {
+        "positive": prompt,
+        "negative": cfg.negative_prompt,
+    }
+    if cfg.prompt_theme is not None:
+        prompt_metadata["expansion"] = {
+            "theme": cfg.prompt_theme,
+            "index": cfg.prompt_index,
+            "seed": cfg.prompt_seed,
+            "system_prompt": EXPANSION_SOURCE,
+        }
     return {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -43,10 +55,7 @@ def build_generation_manifest(
             "cuda": torch.version.cuda,
             "device": cfg.device,
         },
-        "prompt": {
-            "positive": prompt,
-            "negative": cfg.negative_prompt,
-        },
+        "prompt": prompt_metadata,
         "models": {
             "diffusion": _model_id(cfg.unet_name),
             "text_encoder": _model_id(cfg.clip_name),

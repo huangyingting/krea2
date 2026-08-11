@@ -13,10 +13,14 @@ The single-file checkpoint uses Hugging Face key names
 from __future__ import annotations
 
 import os
+import re
 
 import torch
+import torch.nn.functional as F
 from safetensors.torch import load_file
 from transformers import Qwen2Tokenizer
+
+from ..prompting import EXPANSION_SYSTEM_PROMPT
 
 TOKENIZER_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qwen_tokenizer")
 
@@ -171,6 +175,81 @@ class Krea2TextEncoder(torch.nn.Module):
         cond = stacked.reshape(b, seq, n * h)
         self.offload()
         return cond
+
+    @torch.inference_mode()
+    def generate_prompt(
+        self,
+        theme: str,
+        seed: int,
+        max_new_tokens: int = 192,
+        temperature: float = 0.8,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.05,
+    ) -> str:
+        """Expand a theme using the checkpoint's tied token embeddings as its LM head."""
+        if not theme.strip():
+            raise ValueError("theme must not be empty")
+        self.to_device()
+        conversation = (
+            f"<|im_start|>system\n{EXPANSION_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n{theme.strip()}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        input_ids = self.tokenizer(
+            conversation, add_special_tokens=False, return_tensors="pt"
+        )["input_ids"].to(self.device)
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        generated: list[int] = []
+        past_key_values = None
+
+        for _ in range(max_new_tokens):
+            current_ids = input_ids if past_key_values is None else input_ids[:, -1:]
+            output = self.model(
+                input_ids=current_ids,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = output.past_key_values
+            logits = F.linear(
+                output.last_hidden_state[:, -1],
+                self.model.embed_tokens.weight,
+            ).float()
+            if generated:
+                previous = torch.tensor(
+                    sorted(set(generated)), device=self.device, dtype=torch.long
+                )
+                scores = logits[:, previous]
+                logits[:, previous] = torch.where(
+                    scores < 0,
+                    scores * repetition_penalty,
+                    scores / repetition_penalty,
+                )
+            logits /= temperature
+            values, indices = torch.topk(logits, min(top_k, logits.shape[-1]), dim=-1)
+            probabilities = torch.softmax(values, dim=-1)
+            cumulative = probabilities.cumsum(dim=-1)
+            excluded = cumulative > top_p
+            excluded[:, 1:] = excluded[:, :-1].clone()
+            excluded[:, 0] = False
+            probabilities.masked_fill_(excluded, 0)
+            probabilities /= probabilities.sum(dim=-1, keepdim=True)
+            selected = torch.multinomial(probabilities, 1, generator=generator)
+            token = indices.gather(-1, selected)
+            token_id = int(token.item())
+            if token_id == self.tokenizer.eos_token_id:
+                break
+            generated.append(token_id)
+            input_ids = token
+
+        text = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[-1].strip()
+        text = " ".join(text.split())
+        if not text:
+            raise RuntimeError("Qwen returned an empty expanded prompt")
+        return text
 
 
 def conditioning_zero_out(cond: torch.Tensor) -> torch.Tensor:

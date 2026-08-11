@@ -157,16 +157,16 @@ determinism, shapes, ranges and the tolerances above.
 
 | Stage | Output | Warm time |
 | --- | --- | ---: |
-| text encode | — | 1.3 s |
+| text encode (resident Qwen) | — | 0.05 s |
 | Krea 2 sampling + VAE decode | 1248² | 6.9 s |
 | Ultimate SD upscale ×2 (Chess, 1344² tiles) | 2496² | 14.1 s |
 | ColorMatch (hm-mkl-hm, 0.22) | 2496² | 2.2 s |
 | SeedVR2 (7B) | 4096² | 19.3 s |
 | 4× model upscale + Lanczos + blend 0.4 | 4096² | 7.4 s |
-| **total** | **4096²** | **51.6 s**, 47.5 GB |
+| **total** | **4096²** | **~50.4 s**, ~55 GB |
 
 The first image after service startup is about **78 s** because checkpoints and
-compiled kernels must be loaded. Every later image is about **51.6 s**. The
+compiled kernels must be loaded. Every later image is about **50.4 s**. The
 one-time compile from source takes longer on the very first run, but Inductor's
 disk cache is persistent in the supplied service. A real three-prompt batch
 completed in **3m04s**; its final image took **50.7 s**.
@@ -179,9 +179,9 @@ batch-1 DiT numerics. The saver writes `_00`, `_01`, … suffixes.
 
 | Batch | Warm total | Per image | Peak VRAM |
 | ---: | ---: | ---: | ---: |
-| 1 | 51.6 s | 51.6 s | 47.5 GB |
-| 2 | 99.7 s | 49.9 s | 47.6 GB |
-| 4 | **191.8 s** | **48.0 s** | 53.5 GB |
+| 1 | ~50.4 s | ~50.4 s | ~55 GB |
+| 2 | **95.7 s** | **47.9 s** | 55.0 GB |
+| 4 | ~190.6 s | ~47.7 s | ~61 GB |
 
 The batch-4 result was verified as `(4, 4096, 4096, 3)`. Every image is encoded
 as an independent one-frame VAE input and receives tile diffusion.
@@ -195,25 +195,24 @@ swap, and the same 1248² → 2496² → 4096² workload:
 
 | Stage | krea2pipe warm | ComfyUI corrected | Difference |
 | --- | ---: | ---: | ---: |
-| text encode | 1.3 s | 1.0 s | +0.3 s |
+| text encode | 0.05 s | 1.0 s | −0.95 s |
 | Krea 2 sample + VAE decode | 13.7 s | 16.9 s | −3.2 s |
-| USDU | 27.4 s | 29.7 s | −2.3 s |
-| ColorMatch | 2.2 s | 2.2 s | 0.0 s |
-| SeedVR2 | 38.5 s | 44.2 s | −5.7 s |
-| model upscale + Lanczos + blend | 13.8 s | 21.6 s | −7.8 s |
-| **pipeline total** | **96.9 s** | **115.6 s** | **−18.7 s** |
-| **peak VRAM** | **47.6 GB** | **56.8 GB** | **−9.2 GB** |
+| USDU | 27.3 s | 29.7 s | −2.4 s |
+| ColorMatch | 2.3 s | 2.2 s | +0.1 s |
+| SeedVR2 | 38.6 s | 44.2 s | −5.6 s |
+| model upscale + Lanczos + blend | 13.7 s | 21.6 s | −7.9 s |
+| **pipeline total** | **95.7 s** | **115.6 s** | **−19.9 s** |
+| **peak VRAM** | **55.0 GB** | **56.8 GB** | **−1.8 GB** |
 
-krea2pipe is 16.2% faster for equivalent batch-2 work. Its measured 97.4 s
-per prompt also includes 0.5 s of JPEG writing; reference image writes occur
-outside its timers. ComfyUI loads the Krea 2 checkpoints before its timers, so
-cold-start totals are not directly comparable.
+krea2pipe is 17.2% faster for equivalent batch-2 work. Reference image writes
+occur outside its timers. ComfyUI loads the Krea 2 checkpoints before its
+timers, so cold-start totals are not directly comparable.
 
-The only slower warm stage is text encoding by 0.3 s. Keeping the 4B Qwen
-encoder permanently on the GPU reduces a resident encode from 1.3 s to 0.04 s,
-but consumes another 7.57 GB throughout the remaining pipeline for only about
-1.3% end-to-end improvement. The default therefore releases it to preserve
-batch headroom. No parity-safe GPU stage showed a remaining performance gap.
+The 4B Qwen encoder remains pinned so theme expansion and conditioning reuse
+the same weights. This reduces a resident encode from 1.3 s to 0.05 s and adds
+7.57 GB of persistent VRAM. Measured batch-2 peaks were 69.1 GB during the
+cold compiled run and 55.0 GB warm. No parity-safe GPU stage showed a remaining
+performance gap.
 
 ### Where the time went
 
@@ -258,6 +257,37 @@ prompt; directories are scanned recursively in stable filename order. When
 ```bash
 uv run krea2pipe /data/krea2/prompts
 ```
+
+### Resident-Qwen theme mode
+
+Instead of supplying prompt files, provide a theme and let the same Qwen3-VL
+model used for Krea conditioning expand it into varied prompts:
+
+```toml
+theme = "Quiet architecture where nature and technology coexist"
+prompt-count = 0
+```
+
+`prompt-count` is the total number of prompts for that theme; zero runs
+continuously until interrupted. Qwen remains on the GPU across generation,
+using Krea 2's official
+[`docs/expansion.txt`](https://github.com/krea-ai/krea-2/blob/db3984fbc6e13b34c0064990fc2d95ac64d00058/docs/expansion.txt)
+as its system prompt. Different deterministic sampling seeds produce a new
+expanded paragraph for each index. Expansion takes about 6 seconds on the
+target A100 and is performed before the image pipeline.
+
+The theme may specify its output language directly, for example:
+
+```toml
+theme = "请只用中文输出。主题：一座自然与科技和谐共存的未来城市。"
+```
+
+Theme progress, the resolved base/USDU/SeedVR2 seeds, and the next prompt index
+are atomically persisted in
+`OUTPUT_DIR/.krea2pipe-theme-progress.json`. Restarting resumes the same
+sequence; increasing a finite `prompt-count` continues it. The expanded prompt,
+original theme, index, prompt seed, and expansion-system source are also stored
+inside every image's reproducibility manifest.
 
 After an image is saved, its absolute source filename, line number and content
 digest are fsynced to `OUTPUT_DIR/.krea2pipe-progress.tsv`. If the process or
@@ -404,6 +434,7 @@ src/krea2pipe/
   lora.py          LoRA weight merging
   nodes.py         resolution, arithmetic, metadata, and saving utilities
   metadata.py      versioned image generation manifests and extraction
+  prompting.py     official Krea 2 prompt-expansion system instructions
   imageutil.py     tensor/PIL helpers, common_upscale, tiled_scale
   upscale.py       ImageUpscaleWithModel (spandrel + tiling)
   usdu.py          UltimateSDUpscale

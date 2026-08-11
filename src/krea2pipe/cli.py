@@ -25,6 +25,7 @@ from .workflow import (
     DEFAULT_PROMPT,
     PipelineOutOfMemoryError,
     WorkflowConfig,
+    expand_theme,
     run_workflow,
 )
 
@@ -147,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "per non-empty line and completed lines are skipped on restart")
     g.add_argument("--prompt", "-p", default=None,
                    help=f"a single prompt (default: built-in demo prompt {DEFAULT_PROMPT[:40]!r}...)")
+    g.add_argument("--theme", default=None,
+                   help="use resident Qwen to expand this theme into image prompts")
+    g.add_argument("--prompt-count", type=int, default=1,
+                   help="theme prompts to generate; 0 runs continuously")
     g.add_argument("--watch", type=float, default=0, metavar="SECONDS",
                    help="after finishing, keep rescanning FILE_OR_DIR every SECONDS for new "
                         "lines instead of exiting (for running as a service)")
@@ -429,6 +434,49 @@ def _render_pending(cfg: WorkflowConfig, source: str, announce_empty: bool = Fal
     return len(todo)
 
 
+def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
+    progress = batch.ThemeProgress(
+        cfg.output_dir,
+        theme,
+        {"base": cfg.seed, "usdu": cfg.usdu_seed, "seedvr2": cfg.seedvr2.seed},
+    )
+    seeds = progress.seeds
+    cfg = replace(
+        cfg,
+        seed=seeds["base"],
+        usdu_seed=seeds["usdu"],
+        seedvr2=replace(cfg.seedvr2, seed=seeds["seedvr2"]),
+    )
+    index = progress.next_index
+    target = "unbounded" if prompt_count == 0 else str(prompt_count)
+    print(f"theme queue: {index} completed, target {target}", flush=True)
+    rendered = 0
+    while prompt_count == 0 or index < prompt_count:
+        prompt_seed = (cfg.seed + index) & MAX_SEED
+        print(f"=== [theme {index}] expanding prompt (seed {prompt_seed})", flush=True)
+        prompt = expand_theme(cfg, theme, prompt_seed)
+        print(f"expanded prompt: {prompt}", flush=True)
+        result = _render(replace(
+            cfg,
+            prompt=prompt,
+            prompt_theme=theme,
+            prompt_index=index,
+            prompt_seed=prompt_seed,
+            seed=(cfg.seed + index) & MAX_SEED,
+            usdu_seed=(cfg.usdu_seed + index) & MAX_SEED,
+            seedvr2=replace(
+                cfg.seedvr2,
+                seed=(cfg.seedvr2.seed + index) & MAX_SEEDVR2,
+            ),
+        ))
+        if not result.paths:
+            raise RuntimeError(f"no output was saved for theme prompt {index}")
+        progress.mark_completed(index)
+        index += 1
+        rendered += 1
+    return rendered
+
+
 def _configure_logging(level_name: str, verbose: bool, log_file: str | None) -> None:
     if not isinstance(level_name, str) or level_name not in {
         "DEBUG", "INFO", "WARNING", "ERROR"
@@ -477,6 +525,16 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config_from_args(args)
     if args.source is not None and not isinstance(args.source, str):
         raise SystemExit("source must be a file or directory path")
+    if args.theme is not None and (
+        not isinstance(args.theme, str) or not args.theme.strip()
+    ):
+        raise SystemExit("theme must be a non-empty string")
+    if args.theme is not None:
+        args.theme = args.theme.strip()
+    if isinstance(args.prompt_count, bool) or not isinstance(args.prompt_count, int):
+        raise SystemExit("prompt-count must be an integer")
+    if args.prompt_count < 0:
+        raise SystemExit("prompt-count must be zero or greater")
     if (
         isinstance(args.watch, bool)
         or not isinstance(args.watch, (int, float))
@@ -485,8 +543,14 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--watch must be a finite number of seconds")
     if args.source and args.prompt:
         raise SystemExit("use either FILE_OR_DIR or --prompt, not both")
+    if args.theme and (args.source or args.prompt):
+        raise SystemExit("use theme, FILE_OR_DIR, or --prompt; do not combine them")
+    if not args.theme and args.prompt_count != 1:
+        raise SystemExit("prompt-count is only valid with theme")
     if args.source and not cfg.save:
         raise SystemExit("batch mode requires saving so completed lines can be resumed safely")
+    if args.theme and not cfg.save:
+        raise SystemExit("theme mode requires saving so generation can resume safely")
     if args.watch > 0 and not args.source:
         raise SystemExit("--watch requires FILE_OR_DIR")
     if args.watch < 0:
@@ -502,6 +566,9 @@ def main(argv: list[str] | None = None) -> int:
                 cfg.model_root,
                 cfg.output_dir if cfg.save else "(saving disabled)",
             )
+            if args.theme:
+                _render_theme(cfg, args.theme, args.prompt_count)
+                return 0
             if not args.source:
                 _render(cfg)
                 return 0
@@ -523,7 +590,13 @@ def main(argv: list[str] | None = None) -> int:
             exc_info=logger.isEnabledFor(logging.DEBUG),
         )
         return 1
-    except (batch.AlreadyRunningError, DeviceConfigurationError, OSError, ValueError) as exc:
+    except (
+        batch.AlreadyRunningError,
+        batch.ThemeProgressError,
+        DeviceConfigurationError,
+        OSError,
+        ValueError,
+    ) as exc:
         logger.error("%s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
         return 1
 

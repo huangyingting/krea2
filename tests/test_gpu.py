@@ -51,6 +51,14 @@ def test_prompt_encoding_is_deterministic(pipeline):
     assert torch.equal(a, b)
 
 
+def test_resident_qwen_expands_a_theme(pipeline):
+    encoder_id = id(pipeline.text_encoder)
+    prompt = pipeline.expand_theme("a red fox in a quiet winter forest", seed=2026)
+    assert len(prompt) >= 40
+    assert "\n" not in prompt
+    assert id(pipeline.text_encoder) == encoder_id
+
+
 def test_sampling_is_seed_deterministic(pipeline):
     cond = pipeline.encode_prompt(PROMPT)
     latent = pipeline.empty_latent(256, 256)

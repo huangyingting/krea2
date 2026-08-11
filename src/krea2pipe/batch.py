@@ -9,7 +9,9 @@ up exactly where it stopped instead of regenerating what is already on disk.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
+import tempfile
 from dataclasses import dataclass
 from hashlib import blake2b
 from pathlib import Path
@@ -20,14 +22,27 @@ PROMPT_SUFFIXES = (".txt", ".text", ".prompt", ".prompts")
 
 #: Name of the resume log written inside the output directory.
 PROGRESS_NAME = ".krea2pipe-progress.tsv"
+THEME_PROGRESS_NAME = ".krea2pipe-theme-progress.json"
 
 LOCK_NAME = ".krea2pipe.lock"
 
-__all__ = ["AlreadyRunningError", "OutputLock", "Prompt", "iter_prompts", "Progress"]
+__all__ = [
+    "AlreadyRunningError",
+    "OutputLock",
+    "Progress",
+    "Prompt",
+    "ThemeProgress",
+    "ThemeProgressError",
+    "iter_prompts",
+]
 
 
 class AlreadyRunningError(RuntimeError):
     """Raised when another renderer owns an output directory."""
+
+
+class ThemeProgressError(RuntimeError):
+    """Raised when persisted theme state is invalid or incompatible."""
 
 
 class OutputLock:
@@ -138,3 +153,99 @@ class Progress:
             fh.flush()
             os.fsync(fh.fileno())
         self._done.add(prompt.key)
+
+
+class ThemeProgress:
+    """Atomic progress and resolved seeds for resumable theme generation."""
+
+    def __init__(self, output_dir: str | os.PathLike, theme: str,
+                 seeds: dict[str, int]):
+        self.path = Path(output_dir).expanduser() / THEME_PROGRESS_NAME
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.key = blake2b(theme.encode(), digest_size=16).hexdigest()
+        if self.path.exists():
+            try:
+                self.state = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ThemeProgressError(
+                    f"invalid theme progress file {self.path}: {exc}"
+                ) from exc
+            if (
+                not isinstance(self.state, dict)
+                or self.state.get("schema_version") != 1
+                or not isinstance(self.state.get("themes"), dict)
+            ):
+                raise ThemeProgressError(f"unsupported theme progress file: {self.path}")
+        else:
+            self.state = {"schema_version": 1, "themes": {}}
+
+        entry = self.state["themes"].get(self.key)
+        if entry is None:
+            entry = {
+                "theme": theme,
+                "next_index": 0,
+                "seeds": dict(seeds),
+            }
+            self.state["themes"][self.key] = entry
+            self._write()
+        elif entry.get("theme") != theme:
+            raise ThemeProgressError(f"theme digest collision in {self.path}")
+        self.entry = entry
+
+    @property
+    def next_index(self) -> int:
+        value = self.entry.get("next_index")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ThemeProgressError(f"invalid theme prompt index in {self.path}")
+        return value
+
+    @property
+    def seeds(self) -> dict[str, int]:
+        values = self.entry.get("seeds")
+        if not isinstance(values, dict):
+            raise ThemeProgressError(f"invalid saved theme seeds in {self.path}")
+        required = {"base", "usdu", "seedvr2"}
+        if set(values) != required or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in values.values()
+        ):
+            raise ThemeProgressError(f"invalid saved theme seeds in {self.path}")
+        if not 0 <= values["base"] <= (1 << 64) - 1:
+            raise ThemeProgressError(f"invalid saved base seed in {self.path}")
+        if not 0 <= values["usdu"] <= (1 << 64) - 1:
+            raise ThemeProgressError(f"invalid saved USDU seed in {self.path}")
+        if not 0 <= values["seedvr2"] <= (1 << 32) - 1:
+            raise ThemeProgressError(f"invalid saved SeedVR2 seed in {self.path}")
+        return dict(values)
+
+    def mark_completed(self, index: int) -> None:
+        if index != self.next_index:
+            raise ValueError(
+                f"cannot complete theme prompt {index}; expected {self.next_index}"
+            )
+        self.entry["next_index"] = index + 1
+        self._write()
+
+    def _write(self) -> None:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=self.path.parent,
+            prefix=f".{self.path.name}-",
+            delete=False,
+        ) as fh:
+            temporary = Path(fh.name)
+            json.dump(self.state, fh, ensure_ascii=False, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.replace(temporary, self.path)
+            directory_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise

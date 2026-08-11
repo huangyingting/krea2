@@ -36,6 +36,9 @@ class WorkflowConfig:
     # --- prompt ---
     prompt: Optional[str] = None
     negative_prompt: str = ""
+    prompt_theme: Optional[str] = None
+    prompt_index: Optional[int] = None
+    prompt_seed: Optional[int] = None
 
     # --- models ---
     model_root: str = loaders.DEFAULT_MODEL_ROOT
@@ -268,6 +271,12 @@ def release_models() -> None:
     torch.cuda.empty_cache()
 
 
+def expand_theme(config: WorkflowConfig, theme: str, seed: int) -> str:
+    """Expand one theme using the cached Qwen model."""
+    preflight(config)
+    return _cached_pipeline(config).expand_theme(theme, seed)
+
+
 def run_workflow(config: WorkflowConfig | None = None,
                  progress: Callable[[str], None] | None = None) -> WorkflowResult:
     """Execute the pipeline and return the final image plus intermediates."""
@@ -293,7 +302,6 @@ def run_workflow(config: WorkflowConfig | None = None,
     say("[1/6] encoding prompt")
     with _stage(timings, "text_encode", cfg, width, height):
         cond = pipe.encode_prompt(prompt)
-        pipe.free_text_encoder()
     prefetch()
 
     say(f"[2/6] sampling {cfg.steps} steps @ {width}x{height} (seed {cfg.seed})")

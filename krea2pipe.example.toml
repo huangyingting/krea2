@@ -9,6 +9,11 @@ source = "/data/krea2/prompts"
 # models and compiled graphs remain resident, so subsequent images are fast.
 watch = 10
 
+# Alternatively, remove `source` and `watch`, then enable resident-Qwen theme
+# expansion. Zero means generate continuously until the service is stopped.
+# theme = "Quiet architecture where nature and technology coexist"
+# prompt-count = 0
+
 # The resume ledger is stored here as .krea2pipe-progress.tsv.
 output-dir = "/data/krea2/output"
 

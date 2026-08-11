@@ -73,6 +73,17 @@ def validate_settings(cfg: WorkflowConfig) -> None:
     if cfg.prompt is not None:
         _string(cfg.prompt, "prompt", allow_empty=True)
     _string(cfg.negative_prompt, "negative-prompt", allow_empty=True)
+    expansion_values = (cfg.prompt_theme, cfg.prompt_index, cfg.prompt_seed)
+    if any(value is not None for value in expansion_values):
+        if any(value is None for value in expansion_values):
+            raise ValueError("prompt theme, index, and seed must be configured together")
+        _string(cfg.prompt_theme, "prompt theme")
+        _integer(cfg.prompt_index, "prompt index")
+        _integer(cfg.prompt_seed, "prompt seed")
+        if cfg.prompt_index < 0:
+            raise ValueError("prompt index must be non-negative")
+        if not 0 <= cfg.prompt_seed <= (1 << 64) - 1:
+            raise ValueError("prompt seed must be an unsigned 64-bit integer")
     if "/" in cfg.time_format or "\\" in cfg.time_format:
         raise ValueError("time-format must not contain path separators")
     if cfg.loras is not None:
