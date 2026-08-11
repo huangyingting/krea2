@@ -1,13 +1,9 @@
-"""UltimateSDUpscale - pure python port.
+"""Ultimate SD upscale with whole-image model scaling and tiled diffusion.
 
-Re-implementation of ``ComfyUI_UltimateSDUpscale`` as configured in
-``krea2.json``: an upscale-model pass over the whole image followed by a tile-by-tile
-img2img "redraw" pass in *Chess* order. The geometry and single-image behavior are
-faithful; IMAGE batches deliberately keep an independent temporal dimension per
-image. ComfyUI's generic 3D VAE adapter instead treats the IMAGE batch as video
-frames, causing Wan VAE to truncate batches of two through four to the first frame.
+The default path redraws tiles in Chess order. Batched images retain independent
+single-frame VAE dimensions so every image is refined.
 
-Sources ported here:
+Algorithm sources:
 
 * ``repositories/ultimate_sd_upscale/scripts/ultimate-upscale.py`` - ``USDUpscaler``,
   ``USDURedraw.chess_process``, ``calc_rectangle``, ``get_factor(s)``.

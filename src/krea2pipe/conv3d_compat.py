@@ -6,10 +6,8 @@ cuDNN directly sidesteps the buggy dispatch layer.  Both VAEs in this project
 (Qwen-Image / Wan2.1 for Krea2 and the SeedVR2 causal video VAE) are built out
 of ``Conv3d``, so this is worth several seconds per 4K image.
 
-The same workaround is used by ``ComfyUI-SeedVR2_VideoUpscaler``
-(``src/optimization/compatibility.py``), which is why the ComfyUI graph is
-faster than a naive port.  It is probed for once and falls back to the stock
-``Conv3d`` automatically whenever it does not apply.
+The workaround is probed once and falls back to stock ``Conv3d`` whenever it
+does not apply.
 """
 
 from __future__ import annotations

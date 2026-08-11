@@ -1,7 +1,7 @@
 """SeedVR2 diffusion upscaler.
 
-Ported from the official ByteDance-Seed/SeedVR repository (Apache-2.0, see
-``LICENSE`` in this directory).  Changes with respect to upstream:
+Derived from the official ByteDance-Seed/SeedVR repository (Apache-2.0; see
+``LICENSE``). Runtime adaptations:
 
 * ``common.distributed`` is replaced by :mod:`krea2pipe.seedvr2.parallel`
   (single process - every sequence-parallel collective is an identity);
@@ -10,9 +10,8 @@ Ported from the official ByteDance-Seed/SeedVR repository (Apache-2.0, see
 * apex ``FusedLayerNorm`` / ``FusedRMSNorm`` are replaced by the equivalent
   torch layers;
 * checkpoints may be ``.safetensors`` (including the fp8 releases);
-* :mod:`krea2pipe.seedvr2.color_fix` and the ``max_resolution`` option
-  reproduce the behaviour of the ``SeedVR2VideoUpscaler`` ComfyUI node used by
-  ``krea2.json``.
+* :mod:`krea2pipe.seedvr2.color_fix` provides selectable color correction;
+* ``max_resolution`` caps the long edge for predictable memory use.
 """
 
 from .runner import (SeedVR2Config, SeedVR2Upscaler, release_upscaler,

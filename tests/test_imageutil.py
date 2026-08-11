@@ -38,7 +38,7 @@ def test_get_image_size_returns_width_height_batch():
 def test_image_scale_methods(method):
     out = imageutil.image_scale(torch.rand(1, 16, 16, 3), method, 32, 24)
     assert out.shape == (1, 24, 32, 3)
-    # like ComfyUI, only the (PIL based) lanczos path clamps; bicubic may overshoot
+    # Only the PIL-based Lanczos path clamps; bicubic may overshoot.
     tol = 0.0 if method != "bicubic" else 0.2
     assert -tol <= float(out.min()) and float(out.max()) <= 1.0 + tol
 
@@ -47,7 +47,7 @@ def test_lanczos_preserves_flat_colour():
     flat = torch.full((1, 3, 16, 16), 0.5)
     out = imageutil.lanczos(flat, 32, 32)
     assert out.shape == (1, 3, 32, 32)
-    # comfy.utils.lanczos round-trips through 8 bit PIL images
+    # Lanczos round-trips through 8-bit PIL images.
     assert torch.allclose(out, torch.full_like(out, 0.5), atol=1 / 255)
 
 

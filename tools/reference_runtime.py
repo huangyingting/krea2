@@ -1,11 +1,11 @@
-"""Reference run through the *real* ComfyUI (headless) - used to validate the port.
+"""Headless development reference used for numerical validation.
 
-Run with ComfyUI's own interpreter::
+Run with the reference runtime's interpreter::
 
-    /data/ComfyUI/venv/bin/python tools/comfy_reference.py --stage base
+    $KREA2_REFERENCE_ROOT/venv/bin/python tools/reference_runtime.py --stage base
 
-It executes the same node graph as ``krea2.json`` (with a benign prompt) and writes the
-resulting image/latent so that the tests can compare them against krea2pipe's output.
+It executes an equivalent development graph and writes images/latents for
+cross-implementation checks. It is not imported by the application.
 """
 
 import argparse
@@ -14,9 +14,9 @@ import os
 import sys
 import time
 
-COMFY_ROOT = os.environ.get("COMFYUI_ROOT", "/data/ComfyUI")
-sys.path.insert(0, COMFY_ROOT)
-os.chdir(COMFY_ROOT)
+REFERENCE_ROOT = os.environ.get("KREA2_REFERENCE_ROOT", "/data/reference-runtime")
+sys.path.insert(0, REFERENCE_ROOT)
+os.chdir(REFERENCE_ROOT)
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -37,7 +37,7 @@ class Timer:
     def __exit__(self, *exc):
         torch.cuda.synchronize()
         self.sink[self.name] = time.perf_counter() - self.t0
-        print(f"[comfy] {self.name}: {self.sink[self.name]:.1f}s", flush=True)
+        print(f"[reference] {self.name}: {self.sink[self.name]:.1f}s", flush=True)
         return False
 
 
@@ -50,7 +50,7 @@ def save(image, path):
             round(float((image[0] - image[i]).abs().mean()), 6)
             for i in range(1, image.shape[0])
         ]
-        print("[comfy] mean batch deltas from image 0:", deltas)
+        print("[reference] mean batch deltas from image 0:", deltas)
 
 
 def main():
@@ -73,7 +73,7 @@ def main():
     ap.add_argument("--seedvr2-attention", default="sageattn_3",
                     help="the workflow asks for sageattn_3; the node falls back to sdpa")
     ap.add_argument("--seedvr2-blocks-to-swap", type=int, default=36,
-                    help="krea2.json uses 36; pass 0 to keep every block resident")
+                    help="reference default is 36; pass 0 to keep every block resident")
     ap.add_argument("--input-image", default=None,
                     help="skip the base sampling stage and load this image instead")
     ap.add_argument("--trace-shapes", action="store_true",
@@ -99,7 +99,7 @@ def main():
     if args.trace_shapes:
         model.model.diffusion_model.blocks[0].register_forward_pre_hook(
             lambda _module, inputs: print(
-                "[comfy] block input", tuple(inputs[0].shape), flush=True
+                "[reference] block input", tuple(inputs[0].shape), flush=True
             )
         )
     (clip,) = CLIPLoader().load_clip("qwen3vl_4b_bf16.safetensors", "krea2")
@@ -143,7 +143,7 @@ def main():
                     "latent", call_args[8] if len(call_args) > 8 else None
                 )
                 print(
-                    "[comfy] USDU latent",
+                    "[reference] USDU latent",
                     tuple(latent["samples"].shape),
                     "shared images",
                     len(processing_globals["shared"].batch),
@@ -151,7 +151,7 @@ def main():
                 )
                 samples = original_sample(*call_args, **call_kwargs)
                 print(
-                    "[comfy] USDU samples",
+                    "[reference] USDU samples",
                     tuple(samples["samples"].shape),
                     flush=True,
                 )
@@ -162,7 +162,7 @@ def main():
             def traced_decode(self, vae, samples):
                 decoded = original_decode(self, vae, samples)
                 print(
-                    "[comfy] USDU decoded",
+                    "[reference] USDU decoded",
                     tuple(decoded[0].shape),
                     flush=True,
                 )
@@ -188,13 +188,13 @@ def main():
     if args.stage == "full":
         run_final_chain(nodes, image, usdu_image, upscale_model, args, timings)
 
-    print("[comfy] TIMINGS", {k: round(v, 1) for k, v in timings.items()})
-    print(f"[comfy] TOTAL {sum(timings.values()):.1f}s  "
+    print("[reference] TIMINGS", {k: round(v, 1) for k, v in timings.items()})
+    print(f"[reference] TOTAL {sum(timings.values()):.1f}s  "
           f"peak VRAM {torch.cuda.max_memory_allocated() / 2 ** 30:.1f} GB")
 
 
 def run_final_chain(nodes, base_image, usdu_image, upscale_model, args, timings):
-    """ColorMatch -> SeedVR2 -> (4x model + lanczos) -> ImageBlend, as in krea2.json."""
+    """Run ColorMatch, SeedVR2, model upscale, Lanczos resize, and blending."""
     color_match_cls = nodes.NODE_CLASS_MAPPINGS["ColorMatch"]
     blend_cls = nodes.NODE_CLASS_MAPPINGS["ImageBlend"]
     scale_cls = nodes.NODE_CLASS_MAPPINGS["ImageScale"]
@@ -217,9 +217,13 @@ def run_final_chain(nodes, base_image, usdu_image, upscale_model, args, timings)
 
 
 def run_seedvr2_node(image, args):
-    """Drive the ComfyUI SeedVR2 custom node with the widget values of krea2.json."""
-    sys.path.insert(0, os.path.join(COMFY_ROOT, "custom_nodes",
-                                    "ComfyUI-SeedVR2_VideoUpscaler"))
+    """Drive the development reference SeedVR2 implementation."""
+    sys.path.insert(
+        0,
+        os.environ.get(
+            "SEEDVR2_REFERENCE_ROOT", os.path.join(REFERENCE_ROOT, "seedvr2")
+        ),
+    )
     from src.core.generation_phases import (decode_all_batches, encode_all_batches,
                                             postprocess_all_batches, upscale_all_batches)
     from src.core.generation_utils import (compute_generation_info, load_text_embeddings,
@@ -237,7 +241,7 @@ def run_seedvr2_node(image, args):
                                    tensor_offload_device=None, debug=debug)
     runner, cache_context = prepare_runner(
         dit_model=args.seedvr2_model, vae_model="ema_vae_fp16.safetensors",
-        model_dir=os.path.join(COMFY_ROOT, "models", "SEEDVR2"), debug=debug, ctx=ctx,
+        model_dir=os.path.join(REFERENCE_ROOT, "models", "SEEDVR2"), debug=debug, ctx=ctx,
         dit_cache=False, vae_cache=False, dit_id=None, vae_id=None,
         block_swap_config=block_swap,
         encode_tiled=True, encode_tile_size=(1024, 1024), encode_tile_overlap=(128, 128),

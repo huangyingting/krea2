@@ -1,9 +1,4 @@
-"""Image tensor helpers.
-
-Faithful ports of the ComfyUI helpers used by the workflow:
-``comfy/utils.py`` (``lanczos``, ``common_upscale``, ``tiled_scale``) and the
-BHWC float32 [0, 1] "IMAGE" convention used by every node.
-"""
+"""BHWC image tensor conversion, resizing, and tiled-scaling helpers."""
 
 from __future__ import annotations
 
@@ -33,7 +28,7 @@ def tensor_to_pil(image: Tensor, index: int = 0) -> Image.Image:
 # --- resizing ----------------------------------------------------------------------
 
 def lanczos(samples: Tensor, width: int, height: int) -> Tensor:
-    """comfy.utils.lanczos - PIL based, operates on BCHW."""
+    """PIL-based Lanczos resize operating on BCHW tensors."""
     images = [
         Image.fromarray(np.clip(255.0 * image.movedim(0, -1).cpu().float().numpy(), 0, 255).astype(np.uint8))
         for image in samples
@@ -45,7 +40,7 @@ def lanczos(samples: Tensor, width: int, height: int) -> Tensor:
 
 
 def common_upscale(samples: Tensor, width: int, height: int, upscale_method: str, crop: str) -> Tensor:
-    """comfy.utils.common_upscale for 4D BCHW tensors."""
+    """Resize a 4D BCHW tensor with optional center cropping."""
     if crop == "center":
         old_width = samples.shape[-1]
         old_height = samples.shape[-2]
@@ -96,7 +91,7 @@ def tiled_scale(
     output_device: str | torch.device = "cpu",
     pbar=None,
 ) -> Tensor:
-    """ComfyUI-style tiled scale, batching matching tiles across IMAGE entries."""
+    """Scale tiled images while batching corresponding tiles across images."""
     out = torch.zeros(
         (samples.shape[0], out_channels)
         + tuple(round(a * upscale_amount) for a in samples.shape[2:]),

@@ -1,15 +1,13 @@
-"""Numerical parity check: krea2pipe's SeedVR2 port vs the ComfyUI custom node.
+"""Numerical check between local SeedVR2 and an independent reference runtime.
 
-The port in ``krea2pipe.seedvr2`` is a first-party port of the *official*
-ByteDance SeedVR repository (https://github.com/ByteDance-Seed/SeedVR).  The
-ComfyUI node ``ComfyUI-SeedVR2_VideoUpscaler`` is an independent adaptation of
-the same code, so it makes a good cross-check.
+Both implementations derive from the official ByteDance SeedVR repository
+(https://github.com/ByteDance-Seed/SeedVR).
 
 Both implementations are fed **identical** latents and noise so that the
-comparison measures the model/attention/normalisation port rather than the
+comparison measures model/attention/normalisation behavior rather than the
 (deliberately different) RNG draw order::
 
-    uv run python tools/seedvr2_parity.py --input /tmp/stage1.png --resolution 1024
+    uv run python tools/seedvr2_reference.py --input /tmp/stage1.png --resolution 1024
 
 Reported metrics on an A100 80GB with ``seedvr2_ema_7b_fp16.safetensors``:
 
@@ -17,7 +15,7 @@ Reported metrics on an A100 80GB with ``seedvr2_ema_7b_fp16.safetensors``:
     DiT output latent               : mean |d| 0.0464, corr 0.9970
     decoded pixels                  : mean |d| 0.45/255
 
-The remaining DiT residual comes from bf16 accumulation order: the port batches
+The remaining DiT residual comes from bf16 accumulation order: the local path batches
 variable-length attention with ``scaled_dot_product_attention`` differently
 from the node, and the two use different RMSNorm implementations.
 """
@@ -33,8 +31,8 @@ import torch
 from PIL import Image
 
 WRAPPER_ROOT = os.environ.get(
-    "SEEDVR2_NODE_ROOT",
-    "/data/ComfyUI/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler",
+    "SEEDVR2_REFERENCE_ROOT",
+    "/data/reference-runtime/seedvr2",
 )
 
 
@@ -45,7 +43,7 @@ def load_image(path: str, size: int | None) -> torch.Tensor:
     return torch.from_numpy(np.asarray(img).astype(np.float32) / 255.0)[None]
 
 
-def run_port(image: torch.Tensor, args) -> dict:
+def run_local(image: torch.Tensor, args) -> dict:
     from torchvision.transforms import Compose, Lambda, Normalize
 
     from krea2pipe.seedvr2 import SeedVR2Config, SeedVR2Upscaler
@@ -99,7 +97,7 @@ def run_port(image: torch.Tensor, args) -> dict:
     }
 
 
-def run_node(reference: dict, args) -> dict:
+def run_reference(local: dict, args) -> dict:
     sys.path.insert(0, WRAPPER_ROOT)
     from src.core.generation_utils import (load_text_embeddings, prepare_runner,  # noqa: E402
                                            script_directory, setup_generation_context)
@@ -130,44 +128,50 @@ def run_node(reference: dict, args) -> dict:
     latent_mode = runner.vae_encode([video])[0].float().cpu()
     runner.config.vae.use_sample = True
 
-    # The ComfyUI node forces one step / cfg 1 for the distilled model.
+    # The distilled reference uses one step and cfg 1.
     runner.config.diffusion.cfg.scale = 1.0
     runner.config.diffusion.cfg.rescale = 0.0
     runner.config.diffusion.timesteps.sampling.steps = 1
     runner.configure_diffusion(device=ctx["dit_device"], dtype=ctx["compute_dtype"])
 
-    noise = reference["noise"].to(latent.device, latent.dtype)
-    blur = reference["latent"].to(latent.device, latent.dtype)
+    noise = local["noise"].to(latent.device, latent.dtype)
+    blur = local["latent"].to(latent.device, latent.dtype)
     conditions = [runner.get_condition(noise, task="sr", latent_blur=blur)]
     with torch.no_grad(), torch.autocast("cuda", torch.bfloat16, enabled=True):
         out = runner.inference(noises=[noise], conditions=conditions,
                                texts_pos=embeds["texts_pos"], texts_neg=embeds["texts_neg"])
 
-    decoded_port = runner.vae_decode([reference["out_latent"].to(args.device, torch.bfloat16)])[0]
-    decoded_node = runner.vae_decode([out[0].to(args.device, torch.bfloat16)])[0]
+    decoded_local = runner.vae_decode(
+        [local["out_latent"].to(args.device, torch.bfloat16)]
+    )[0]
+    decoded_reference = runner.vae_decode(
+        [out[0].to(args.device, torch.bfloat16)]
+    )[0]
     return {
         "latent": latent.float().cpu(),
         "latent_mode": latent_mode,
         "out_latent": out[0].float().cpu(),
-        "decoded_port": decoded_port.float().cpu(),
-        "decoded_node": decoded_node.float().cpu(),
+        "decoded_local": decoded_local.float().cpu(),
+        "decoded_reference": decoded_reference.float().cpu(),
     }
 
 
-def report(port: dict, node: dict) -> dict:
+def report(local: dict, reference: dict) -> dict:
     def diff(a, b):
         d = (a - b).abs()
         return float(d.mean()), float(d.max())
 
-    mean_mode, max_mode = diff(port["latent_mode"], node["latent_mode"])
-    mean_out, max_out = diff(port["out_latent"], node["out_latent"])
+    mean_mode, max_mode = diff(local["latent_mode"], reference["latent_mode"])
+    mean_out, max_out = diff(local["out_latent"], reference["out_latent"])
     corr = float(torch.corrcoef(torch.stack([
-        port["out_latent"].flatten(), node["out_latent"].flatten()]))[0, 1])
-    mean_px, max_px = diff(node["decoded_port"], node["decoded_node"])
+        local["out_latent"].flatten(), reference["out_latent"].flatten()]))[0, 1])
+    mean_px, max_px = diff(
+        reference["decoded_local"], reference["decoded_reference"]
+    )
     metrics = {
         "vae_latent_mean_abs": mean_mode,
         "vae_latent_max_abs": max_mode,
-        "vae_latent_std": float(port["latent_mode"].std()),
+        "vae_latent_std": float(local["latent_mode"].std()),
         "dit_latent_mean_abs": mean_out,
         "dit_latent_max_abs": max_out,
         "dit_latent_corr": corr,
@@ -187,19 +191,24 @@ def main() -> int:
     ap.add_argument("--resolution", type=int, default=1024, help="SeedVR2 target resolution")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--model", default="seedvr2_ema_7b_fp16.safetensors")
-    ap.add_argument("--model-dir", default="/data/ComfyUI/models/SEEDVR2")
+    ap.add_argument(
+        "--model-dir",
+        default=os.path.join(
+            os.environ.get("KREA2_MODEL_ROOT", "/data/models"), "SEEDVR2"
+        ),
+    )
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
 
     if not os.path.isdir(WRAPPER_ROOT):
-        print(f"ComfyUI SeedVR2 node not found at {WRAPPER_ROOT}", file=sys.stderr)
+        print(f"SeedVR2 reference not found at {WRAPPER_ROOT}", file=sys.stderr)
         return 2
 
     image = load_image(args.input, args.input_size)
-    port = run_port(image, args)
+    local = run_local(image, args)
     del_cuda_cache()
-    node = run_node(port, args)
-    report(port, node)
+    reference = run_reference(local, args)
+    report(local, reference)
     return 0
 
 

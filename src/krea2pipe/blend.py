@@ -42,7 +42,7 @@ def _blend_mode(img1: Tensor, img2: Tensor, mode: str) -> Tensor:
 
 def image_blend(image1: Tensor, image2: Tensor, blend_factor: float,
                 blend_mode: str = "normal") -> Tensor:
-    """Blend two BHWC image batches, matching ComfyUI's ImageBlend node."""
+    """Blend two BHWC image batches."""
     image2 = image2.to(image1.device)
     if image1.shape != image2.shape:
         image2 = image2.permute(0, 3, 1, 2)

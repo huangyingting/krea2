@@ -30,9 +30,7 @@ class SideResize:
         self.size = size
         self.downsample_only = downsample_only
         self.interpolation = interpolation
-        # ``max_size`` caps the longest edge.  Not part of the upstream research
-        # code; it mirrors the ``max_resolution`` widget of the ComfyUI node so
-        # the workflow can be reproduced exactly.
+        # ``max_size`` caps the longest edge for predictable memory use.
         self.max_size = max_size
 
     def __call__(self, image: Union[torch.Tensor, Image.Image]):

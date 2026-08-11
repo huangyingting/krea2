@@ -56,6 +56,11 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["aspect-ratio"] == "1:1"
     assert generated["steps"] == 8
     assert generated["sampler"] == "euler_ancestral"
+    assert generated["log-level"] == "INFO"
+    assert "log-file = " in file.read_text()
+    from krea2pipe.workflow import WorkflowConfig
+
+    assert generated["model-root"] == WorkflowConfig().model_root
     assert generated["loras"] == [
         {"name": "atmospheric photography.safetensors", "strength": 0.6}
     ]
@@ -192,5 +197,29 @@ def test_service_example_exposes_every_optional_stage():
     assert cfg.run_color_match
     assert cfg.run_seedvr2
     assert cfg.run_blend
+    assert cfg.model_root == "/data/models"
+    assert cfg.seedvr2.model_dir == "/data/models/SEEDVR2"
     assert cfg.color_match_method == "hm-mkl-hm"
     assert cfg.blend_upscale_model_name == "4xNomosWebPhoto_RealPLKSR.pth"
+
+
+def test_config_rejects_relative_model_root(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('model-root = "relative/models"\n')
+    with pytest.raises(SystemExit, match="model-root must be an absolute path"):
+        config_from_args(parse_args(["--config", str(file)]))
+
+
+def test_config_rejects_wrong_scalar_types(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('batch-size = "four"\n')
+    with pytest.raises(SystemExit) as exc:
+        config_from_args(parse_args(["--config", str(file)]))
+    assert exc.value.code == 2
+
+
+def test_config_rejects_invalid_log_level(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('log-level = "TRACE"\n')
+    with pytest.raises(SystemExit, match="log-level must be"):
+        main(["--config", str(file), "--device", "cpu", "--no-save"])

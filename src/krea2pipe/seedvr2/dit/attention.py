@@ -13,7 +13,7 @@
 # // limitations under the License.
 """Attention layers.
 
-Upstream calls ``flash_attn_varlen_func``; this port uses PyTorch's
+Upstream calls ``flash_attn_varlen_func``; this implementation uses PyTorch's
 ``scaled_dot_product_attention`` instead so no compiled extension is required.
 Sequences that share a length are batched together (identical lengths are the
 norm here, since SeedVR attends over fixed-size windows), which keeps a single

@@ -8,6 +8,7 @@ up exactly where it stopped instead of regenerating what is already on disk.
 
 from __future__ import annotations
 
+import fcntl
 import os
 from dataclasses import dataclass
 from hashlib import blake2b
@@ -20,7 +21,51 @@ PROMPT_SUFFIXES = (".txt", ".text", ".prompt", ".prompts")
 #: Name of the resume log written inside the output directory.
 PROGRESS_NAME = ".krea2pipe-progress.tsv"
 
-__all__ = ["Prompt", "iter_prompts", "Progress"]
+LOCK_NAME = ".krea2pipe.lock"
+
+__all__ = ["AlreadyRunningError", "OutputLock", "Prompt", "iter_prompts", "Progress"]
+
+
+class AlreadyRunningError(RuntimeError):
+    """Raised when another renderer owns an output directory."""
+
+
+class OutputLock:
+    """Prevent concurrent renderers from corrupting one resume ledger."""
+
+    def __init__(self, output_dir: str | os.PathLike):
+        self.path = Path(output_dir).expanduser() / LOCK_NAME
+        self._file = None
+
+    def __enter__(self) -> OutputLock:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("a+", encoding="ascii")
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            self._file.close()
+            self._file = None
+            raise AlreadyRunningError(
+                f"another krea2pipe process is using output-dir {self.path.parent}"
+            ) from exc
+        self._file.seek(0)
+        try:
+            self._file.truncate()
+            self._file.write(f"{os.getpid()}\n")
+            self._file.flush()
+            os.fsync(self._file.fileno())
+        except OSError:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            self._file.close()
+            self._file = None
+            raise
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._file is not None:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            self._file.close()
+            self._file = None
 
 
 @dataclass(frozen=True)
@@ -46,10 +91,6 @@ class Prompt:
 def prompt_files(path: str | os.PathLike) -> list[Path]:
     """The prompt files ``path`` refers to, sorted so a run is reproducible."""
     p = Path(path).expanduser()
-    if not p.exists():
-        from .loaders import resolve_prompt_file
-
-        p = Path(resolve_prompt_file(str(p)))
     if p.is_dir():
         files = sorted(f for f in p.rglob("*") if f.is_file()
                        and f.suffix.lower() in PROMPT_SUFFIXES)
@@ -91,9 +132,9 @@ class Progress:
         """Record ``prompt`` as done, durably enough to survive a power cut."""
         if prompt.key in self._done:
             return
-        self._done.add(prompt.key)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(prompt.key + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+        self._done.add(prompt.key)

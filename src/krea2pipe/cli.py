@@ -1,30 +1,36 @@
-"""Command line front-end: ``krea2pipe [options]``.
-
-Runs the whole ``krea2.json`` graph (or a subset of its stages) without
-ComfyUI.  Every workflow widget has a matching flag; the defaults reproduce the
-original workflow exactly.
-"""
+"""Command-line front end for the standalone Krea 2 pipeline."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import math
+import os
 import secrets
 import sys
 import time
 from collections.abc import Collection
+from contextlib import nullcontext
 from dataclasses import replace
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import torch
 
-from . import batch, blend, color_match, sampling
+from . import batch, blend, color_match, loaders, sampling
 from .config import config_options, load_config, write_config_template
 from .seedvr2 import SeedVR2Config
-from .workflow import DEFAULT_PROMPT, WorkflowConfig, run_workflow
+from .validation import DeviceConfigurationError, validate_settings
+from .workflow import (
+    DEFAULT_PROMPT,
+    PipelineOutOfMemoryError,
+    WorkflowConfig,
+    run_workflow,
+)
 
 DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 MAX_SEED = (1 << 64) - 1
+logger = logging.getLogger(__name__)
 
 
 def _seed_value(value: object) -> int | str:
@@ -98,7 +104,7 @@ class _AppendLoRA(argparse.Action):
 
 
 def _require_choice(value: str, choices: Collection[str], option: str) -> str:
-    if value not in choices:
+    if not isinstance(value, str) or value not in choices:
         allowed = ", ".join(sorted(choices))
         raise SystemExit(f"{option}: unsupported value {value!r}; choose one of: {allowed}")
     return value
@@ -119,7 +125,7 @@ def _unit_float(value: object, option: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="krea2pipe",
-        description="Pure-python port of the 'Moody Krea2 4KHD' ComfyUI workflow.",
+        description="Standalone Krea 2 image-generation and upscaling pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     d = WorkflowConfig()
@@ -154,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--batch-size", type=int, default=d.batch_size,
                    help="number of independent images generated for each prompt")
 
-    g = p.add_argument_group("sampling (KSamplerAdvanced)")
+    g = p.add_argument_group("sampling")
     g.add_argument("--seed", type=_seed_argument, default=d.seed,
                    help="integer seed or 'random' (chosen once at startup)")
     g.add_argument("--steps", type=int, default=d.steps,
@@ -168,12 +174,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="base scheduler: normal, sgm_uniform, or simple")
 
     g = p.add_argument_group("models")
+    g.add_argument("--model-root", default=d.model_root,
+                   help="absolute root containing diffusion_models, text_encoders, "
+                        "vae, loras, upscale_models, and SEEDVR2")
     g.add_argument("--unet", dest="unet_name", default=d.unet_name,
-                   help="Krea 2 checkpoint under models/diffusion_models")
+                   help="Krea 2 checkpoint under model-root/diffusion_models")
     g.add_argument("--clip", dest="clip_name", default=d.clip_name,
-                   help="Qwen text encoder under models/text_encoders")
+                   help="Qwen text encoder under model-root/text_encoders")
     g.add_argument("--vae", dest="vae_name", default=d.vae_name,
-                   help="Qwen Image VAE under models/vae")
+                   help="Qwen Image VAE under model-root/vae")
     g.add_argument("--lora", dest="lora_name", default=None,
                    help="legacy single LoRA; prefer --add-lora or TOML 'loras'")
     g.add_argument("--lora-strength", type=float, default=d.lora_strength,
@@ -181,11 +190,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--add-lora", dest="loras", action=_AppendLoRA, nargs=2,
         metavar=("FILE", "STRENGTH"), default=None,
-        help="LoRAs under models/loras; add array entries with individual strengths",
+        help="LoRAs under model-root/loras; add entries with individual strengths",
     )
     g.add_argument("--upscale-model", dest="upscale_model_name",
                    default=d.upscale_model_name,
-                   help="model under models/upscale_models used by UltimateSDUpscale")
+                   help="model under model-root/upscale_models used by UltimateSDUpscale")
 
     g = p.add_argument_group("UltimateSDUpscale")
     g.add_argument("--usdu-upscale-by", type=float, default=d.usdu_upscale_by,
@@ -223,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--seedvr2-seed", type=_seed_argument, default=d.seedvr2.seed,
                    help="integer seed or 'random' (chosen once at startup)")
     g.add_argument("--seedvr2-model", default=d.seedvr2.dit_model,
-                   help="SeedVR2 DiT checkpoint under models/SEEDVR2")
+                   help="SeedVR2 DiT checkpoint under model-root/SEEDVR2")
     g.add_argument("--seedvr2-color-correction", default=d.seedvr2.color_correction,
                    choices=["none", "wavelet", "adain", "lab"],
                    help="SeedVR2-internal correction: none, wavelet, adain, or lab")
@@ -233,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the separate model-upscale/Lanczos/blend stage")
     g.add_argument("--blend-upscale-model", dest="blend_upscale_model_name",
                    default=d.blend_upscale_model_name,
-                   help="model under models/upscale_models used only by final blend")
+                   help="model under model-root/upscale_models used only by final blend")
     g.add_argument("--blend-factor", type=float, default=d.blend_factor,
                    help="blend strength from 0 to 1")
     g.add_argument("--blend-mode", default=d.blend_mode, choices=blend.MODES,
@@ -266,13 +275,22 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--dtype", default="bfloat16", choices=sorted(DTYPES),
                    help="model compute precision; keep bfloat16 unless debugging "
                         "or using hardware without bfloat16 support")
+    g.add_argument("--log-level", default="INFO",
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                   help="minimum severity written to the console and log file")
+    g.add_argument("--log-file", default=None,
+                   help="optional rotating log file (10 MiB, five backups)")
     g.add_argument("--verbose", "-v", action="store_true",
-                   help="enable detailed diagnostic logging")
+                   help="enable DEBUG logging, overriding log-level")
     return p
 
 
 def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
     defaults = WorkflowConfig()
+    try:
+        model_root = loaders.normalize_model_root(args.model_root)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     loras = _parse_loras(args.loras)
     if args.lora_name is not None:
         loras = [(args.lora_name, args.lora_strength)]
@@ -295,14 +313,16 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
     dtype_name = _require_choice(args.dtype, DTYPES, "dtype")
     seedvr2 = SeedVR2Config(
         dit_model=args.seedvr2_model,
+        model_dir=os.path.join(model_root, "SEEDVR2"),
         seed=_resolve_seed(args.seedvr2_seed, "seedvr2-seed"),
         resolution=args.seedvr2_resolution,
         max_resolution=args.seedvr2_max_resolution,
         color_correction=args.seedvr2_color_correction,
         device=args.device,
     )
-    return WorkflowConfig(
+    cfg = WorkflowConfig(
         prompt=args.prompt,
+        model_root=model_root,
         unet_name=args.unet_name,
         clip_name=args.clip_name,
         vae_name=args.vae_name,
@@ -348,6 +368,11 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
         device=args.device,
         dtype=DTYPES[dtype_name],
     )
+    try:
+        validate_settings(cfg)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    return cfg
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -396,33 +421,103 @@ def _render_pending(cfg: WorkflowConfig, source: str, announce_empty: bool = Fal
     return len(todo)
 
 
+def _configure_logging(level_name: str, verbose: bool, log_file: str | None) -> None:
+    if not isinstance(level_name, str) or level_name not in {
+        "DEBUG", "INFO", "WARNING", "ERROR"
+    }:
+        raise SystemExit("log-level must be DEBUG, INFO, WARNING, or ERROR")
+    if not isinstance(verbose, bool):
+        raise SystemExit("verbose must be true or false")
+    if log_file is not None and (not isinstance(log_file, str) or not log_file):
+        raise SystemExit("log-file must be a non-empty path")
+    level = logging.DEBUG if verbose else getattr(logging, level_name)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        path = Path(log_file).expanduser()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                RotatingFileHandler(
+                    path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+                )
+            )
+        except OSError as exc:
+            raise SystemExit(f"cannot initialize log-file {path}: {exc}") from exc
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    root = logging.getLogger()
+    for handler in root.handlers:
+        handler.close()
+    root.handlers.clear()
+    root.setLevel(level)
+    for handler in handlers:
+        root.addHandler(handler)
+    logging.captureWarnings(True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.generate_config:
         path = write_config_template(args.generate_config, build_parser())
         print(f"wrote {path}")
         return 0
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _configure_logging(args.log_level, args.verbose, args.log_file)
     cfg = config_from_args(args)
+    if args.source is not None and not isinstance(args.source, str):
+        raise SystemExit("source must be a file or directory path")
+    if (
+        isinstance(args.watch, bool)
+        or not isinstance(args.watch, (int, float))
+        or not math.isfinite(args.watch)
+    ):
+        raise SystemExit("--watch must be a finite number of seconds")
     if args.source and args.prompt:
         raise SystemExit("use either FILE_OR_DIR or --prompt, not both")
     if args.source and not cfg.save:
         raise SystemExit("batch mode requires saving so completed lines can be resumed safely")
     if args.watch > 0 and not args.source:
         raise SystemExit("--watch requires FILE_OR_DIR")
-    if not args.source:
-        _render(cfg)
-        return 0
+    if args.watch < 0:
+        raise SystemExit("--watch must be zero or greater")
 
-    _render_pending(cfg, args.source, announce_empty=True)
-    while args.watch > 0:
-        time.sleep(args.watch)
-        _render_pending(cfg, args.source)
-    return 0
+    lock = batch.OutputLock(cfg.output_dir) if cfg.save else nullcontext()
+    try:
+        with lock:
+            logger.info(
+                "starting device=%s batch-size=%d model-root=%s output-dir=%s",
+                cfg.device,
+                cfg.batch_size,
+                cfg.model_root,
+                cfg.output_dir if cfg.save else "(saving disabled)",
+            )
+            if not args.source:
+                _render(cfg)
+                return 0
+
+            _render_pending(cfg, args.source, announce_empty=True)
+            while args.watch > 0:
+                time.sleep(args.watch)
+                _render_pending(cfg, args.source)
+            return 0
+    except KeyboardInterrupt:
+        logger.warning("interrupted; the active prompt remains pending for the next run")
+        return 130
+    except PipelineOutOfMemoryError as exc:
+        logger.error("%s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
+        return 1
+    except torch.cuda.OutOfMemoryError:
+        logger.error(
+            "CUDA out of memory outside a tracked stage; reduce batch-size or resolution",
+            exc_info=logger.isEnabledFor(logging.DEBUG),
+        )
+        return 1
+    except (batch.AlreadyRunningError, DeviceConfigurationError, OSError, ValueError) as exc:
+        logger.error("%s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

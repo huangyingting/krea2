@@ -75,8 +75,7 @@ class InflatedCausalConv3d(Conv3d):
     def _conv_forward(self, input, weight, bias, *args, **kwargs):
         """Bypass the PyTorch 2.9/2.10 + cuDNN >= 9.10.2 Conv3d dispatch bug.
 
-        Same workaround as ``ComfyUI-SeedVR2_VideoUpscaler``
-        (``src/optimization/compatibility.py``); see ``krea2pipe.conv3d_compat``.
+        See ``krea2pipe.conv3d_compat`` for the direct-dispatch rationale.
         """
         out = conv3d_forward(self, input, weight, bias)
         if out is not None:

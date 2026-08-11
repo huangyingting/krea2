@@ -1,9 +1,7 @@
-"""Tests for the SeedVR2 port (``krea2pipe.seedvr2``).
+"""Tests for the embedded SeedVR2 implementation.
 
-These cover the pieces that were *rewritten* rather than copied from the
-official ByteDance SeedVR repository: the flash-attn replacement, the colour
-correction, and the ``resolution`` / ``max_resolution`` resize semantics of the
-ComfyUI node.
+These cover the local attention implementation, colour correction, and
+resolution-limit behavior.
 """
 
 from __future__ import annotations
@@ -150,7 +148,7 @@ def test_apply_color_correction_rejects_unknown():
         color_fix.apply_color_correction("nope", torch.rand(1, 3, 4, 4), torch.rand(1, 3, 4, 4))
 
 
-# --- NaResize (resolution / max_resolution semantics of the ComfyUI node) --------------
+# --- NaResize resolution limits ---------------------------------------------------------
 
 def _resize(image: torch.Tensor, resolution: int, max_resolution: int) -> tuple[int, int]:
     out = NaResize(resolution=resolution, mode="side", downsample_only=False,
@@ -164,7 +162,7 @@ def test_na_resize_scales_the_short_edge():
 
 
 def test_na_resize_caps_the_long_edge():
-    """``max_resolution`` caps the long edge, exactly like the ComfyUI widget."""
+    """``max_resolution`` caps the long edge."""
     w, h = _resize(torch.rand(1, 3, 512, 256), resolution=1024, max_resolution=1024)
     assert max(w, h) <= 1024
     assert (w, h) == (512, 1024)       # aspect ratio preserved

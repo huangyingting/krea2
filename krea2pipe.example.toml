@@ -12,6 +12,9 @@ watch = 10
 # The resume ledger is stored here as .krea2pipe-progress.tsv.
 output-dir = "/data/krea2/output"
 
+# Absolute standalone model library; relative checkpoint names resolve from here.
+model-root = "/data/models"
+
 # --- Base generation -------------------------------------------------------
 aspect-ratio = "1:1"
 batch-size = 1
@@ -56,3 +59,9 @@ blend-factor = 0.4
 extension = "jpg"
 quality = 100
 save-intermediates = false
+
+# --- Runtime logging -------------------------------------------------------
+# Console logs are captured by journald under systemd. Set log-file to keep an
+# additional local rotating log (10 MiB per file, five backups).
+log-level = "INFO"
+# log-file = "/data/krea2/logs/krea2pipe.log"

@@ -6,9 +6,9 @@
 #   3. Set `watch` above zero for a continuously running service.
 #   4. Run: krea2pipe --config krea2pipe.toml
 #
-# Command-line options override this file. Model names are resolved from
-# $COMFYUI_ROOT/models (default: /data/ComfyUI/models). Keep this file flat:
-# use the keys shown below rather than adding TOML [section] tables.
+# Command-line options override this file. Relative checkpoint names are
+# resolved below the absolute `model-root`; absolute checkpoints also work.
+# Keep this file flat: use these keys rather than TOML [section] tables.
 
 # --- positional arguments ---
 # prompt file, or a folder of prompt files; one image is rendered per non-empty line
@@ -50,17 +50,19 @@ sampler = "euler_ancestral"
 scheduler = "sgm_uniform"
 
 # --- models ---
-# Krea 2 checkpoint under models/diffusion_models
+# absolute root containing all model category directories
+model-root = "/data/ComfyUI/models"
+# Krea 2 checkpoint under model-root/diffusion_models
 unet = "moodyKrea2Mix_v50BF16.safetensors"
-# Qwen text encoder under models/text_encoders
+# Qwen text encoder under model-root/text_encoders
 clip = "qwen3vl_4b_bf16.safetensors"
-# Qwen Image VAE under models/vae
+# Qwen Image VAE under model-root/vae
 vae = "qwen_image_vae.safetensors"
-# LoRAs under models/loras; add array entries with individual strengths
+# LoRAs under model-root/loras; add entries with individual strengths
 loras = [
   { name = "atmospheric photography.safetensors", strength = 0.6 },
 ]
-# model under models/upscale_models used by UltimateSDUpscale
+# model under model-root/upscale_models used by UltimateSDUpscale
 upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
 
 # --- UltimateSDUpscale ---
@@ -94,7 +96,7 @@ seedvr2-resolution = 4096
 seedvr2-max-resolution = 4096
 # integer seed or 'random' (chosen once at startup)
 seedvr2-seed = 1234567892
-# SeedVR2 DiT checkpoint under models/SEEDVR2
+# SeedVR2 DiT checkpoint under model-root/SEEDVR2
 seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"
 # SeedVR2-internal correction: none, wavelet, adain, or lab
 seedvr2-color-correction = "lab"
@@ -102,7 +104,7 @@ seedvr2-color-correction = "lab"
 # --- Upscale blend ---
 # run the separate model-upscale/Lanczos/blend stage
 run-blend = true
-# model under models/upscale_models used only by final blend
+# model under model-root/upscale_models used only by final blend
 blend-upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
 # blend strength from 0 to 1
 blend-factor = 0.4
@@ -135,5 +137,9 @@ device = "cuda"
 # model compute precision; keep bfloat16 unless debugging or using hardware without
 # bfloat16 support
 dtype = "bfloat16"
-# enable detailed diagnostic logging
+# minimum severity written to the console and log file
+log-level = "INFO"
+# optional rotating log file (10 MiB, five backups)
+# log-file = "/data/krea2/logs/krea2pipe.log"
+# enable DEBUG logging, overriding log-level
 verbose = false

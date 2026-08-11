@@ -55,11 +55,10 @@ def test_scheduler_shapes_and_endpoints(scheduler):
     assert torch.all(sigmas[1:] <= sigmas[:-1])       # decreasing
 
 
-def test_sgm_uniform_matches_comfy_values():
+def test_sgm_uniform_matches_reference_values():
     """8-step sgm_uniform sigmas of ModelSamplingFlux(shift=1.15)."""
     sigmas = sampling.calculate_sigmas(sampling.ModelSamplingFlux(), "sgm_uniform", 8)
-    # golden values captured from ComfyUI 0.30.0:
-    #   comfy.samplers.calculate_sigmas(ModelSamplingFlux(shift=1.15), "sgm_uniform", 8)
+    # Golden values for ModelSamplingFlux(shift=1.15), sgm_uniform, 8 steps.
     expected = torch.tensor([1.0000, 0.9567, 0.9046, 0.8404, 0.7596, 0.6548, 0.5132, 0.3114, 0.0])
     assert torch.allclose(sigmas, expected, atol=1e-3)
 
@@ -70,7 +69,7 @@ def test_denoise_shortens_the_schedule():
     partial = sampling.calculate_sigmas(ms, "simple", 2, denoise=0.1)
     assert partial.shape == (3,)
     assert float(partial[0]) < float(full[0])         # starts much closer to the image
-    # denoise=0.1 with 2 steps == the last 3 sigmas of a 20 step schedule (ComfyUI reference)
+    # denoise=0.1 with 2 steps equals the last 3 sigmas of a 20-step schedule.
     reference = sampling.calculate_sigmas(ms, "simple", 20)[-3:]
     assert torch.allclose(partial, reference, atol=1e-4)
     assert float(partial[0]) == pytest.approx(0.2598, abs=1e-3)
@@ -98,7 +97,7 @@ def test_prepare_noise_is_seed_deterministic():
 
 
 def test_prepare_noise_is_cpu_generated_and_batch_wise():
-    """ComfyUI generates one noise tensor per batch item, on the CPU."""
+    """Noise is generated per batch item on the CPU."""
     single = sampling.prepare_noise(torch.zeros(1, 16, 4, 4), 7)
     batch = sampling.prepare_noise(torch.zeros(3, 16, 4, 4), 7)
     assert batch.device.type == "cpu"

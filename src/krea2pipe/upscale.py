@@ -1,4 +1,4 @@
-"""``ImageUpscaleWithModel`` (comfy_extras/nodes_upscale_model.py) - spandrel + tiled_scale."""
+"""Spandrel-backed tiled image upscaling."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ def image_upscale_with_model(upscale_model, image: Tensor, tile: int = 512,
     oom = True
     s = None
     while oom:
+        bar = None
         try:
             steps = in_img.shape[0] * get_tiled_scale_steps(
                 in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
@@ -35,8 +36,11 @@ def image_upscale_with_model(upscale_model, image: Tensor, tile: int = 512,
             bar.close()
             oom = False
         except torch.cuda.OutOfMemoryError:
+            if bar is not None:
+                bar.close()
             tile //= 2
             logger.warning("upscale model OOM, retrying with tile=%d", tile)
+            torch.cuda.empty_cache()
             if tile < 128:
                 raise
     return torch.clamp(s.movedim(-3, -1), min=0, max=1.0)

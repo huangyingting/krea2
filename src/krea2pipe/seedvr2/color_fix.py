@@ -4,9 +4,8 @@
 SeedVR research code (they originate from StableSR): the upscaled result keeps
 its high frequency detail while the low frequency colour comes from the input.
 
-``lab_color_transfer`` additionally matches the CIELAB chrominance histograms,
-which is what the ``color_correction="lab"`` option of the ComfyUI node does and
-what ``krea2.json`` selects.
+``lab_color_transfer`` additionally matches CIELAB chrominance histograms and
+is the pipeline default.
 
 All functions take ``(B, C, H, W)`` tensors; the range only matters for
 ``lab_color_transfer`` which expects ``[-1, 1]``.
@@ -146,7 +145,7 @@ def lab_color_transfer(content_feat: Tensor, style_feat: Tensor,
     """Wavelet reconstruction followed by CIELAB histogram matching.
 
     Inputs and outputs are in ``[-1, 1]``.  ``luminance_weight`` is how much of
-    the content's own L* channel is kept (``0.8`` matches the ComfyUI node).
+    the content's own L* channel is kept.
     """
     dtype = content_feat.dtype
     style = style_feat.float()

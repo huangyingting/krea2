@@ -1,4 +1,4 @@
-"""Logging shims for the ported SeedVR code (``common.logger`` / ``common.decorators``)."""
+"""Logging shims used by the embedded SeedVR inference modules."""
 
 import logging
 from functools import wraps

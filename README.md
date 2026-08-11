@@ -1,8 +1,7 @@
 # krea2pipe
 
-A **pure-Python port of the "Moody Krea2 4KHD" ComfyUI workflow** (`krea2.json`).
-No ComfyUI server, no node graph, no custom-node loader — just a package you
-import (or a CLI you run) that reproduces the workflow end to end:
+A **standalone Python Krea 2 image-generation and 4K upscaling application**.
+It runs directly as a library, CLI, or persistent system service:
 
 ```
 prompt ─▶ Krea 2 txt2img (1248²) ─▶ UltimateSDUpscale ×2 (2496²) ─▶ ColorMatch
@@ -15,9 +14,9 @@ prompt ─▶ Krea 2 txt2img (1248²) ─▶ UltimateSDUpscale ×2 (2496²) ─�
                                               4096×4096 JPEG
 ```
 
-The model weights, LoRAs and prompt files are read straight out of an existing
-ComfyUI installation (`/data/ComfyUI` by default) in their original
-`safetensors` / `.pth` format — nothing has to be converted.
+Model weights are loaded from the configurable `model-root` directory in their
+original `safetensors` / `.pth` format. Absolute checkpoint paths are also
+accepted, and no conversion or external workflow runtime is required.
 
 ---
 
@@ -58,51 +57,42 @@ base = result.stages["base"]    # every intermediate stage is kept
 * Python ≥ 3.12, CUDA GPU. Developed and tested on an **NVIDIA A100 80 GB**
   (the full 4096² run peaks at **55 GB**; use `--seedvr2-resolution 2048` or
   `--no-seedvr2` on smaller cards).
-* An existing ComfyUI model tree. Override the location with
-  `export COMFYUI_ROOT=/path/to/ComfyUI`. Files used:
+* A model library containing these category directories. Set its absolute path
+  with `model-root` in TOML or `--model-root` on the CLI:
 
-| Path (below `COMFYUI_ROOT`) | Purpose |
+| Path (below `model-root`) | Purpose |
 | --- | --- |
-| `models/diffusion_models/moodyKrea2Mix_v50BF16.safetensors` | Krea 2 DiT |
-| `models/text_encoders/qwen3vl_4b_bf16.safetensors` | Qwen3-VL-4B text encoder |
-| `models/vae/qwen_image_vae.safetensors` | VAE |
-| `models/loras/atmospheric photography.safetensors` | LoRA (strength 0.6) |
-| `models/upscale_models/4xNomosWebPhoto_RealPLKSR.pth` | 4× ESRGAN-style upscaler |
-| `models/SEEDVR2/seedvr2_ema_7b_fp16.safetensors` | SeedVR2 7B DiT |
-| `models/SEEDVR2/ema_vae_fp16.safetensors` | SeedVR2 video VAE |
-| `t2i/prompts/...` | optional prompt line files |
+| `diffusion_models/moodyKrea2Mix_v50BF16.safetensors` | Krea 2 DiT |
+| `text_encoders/qwen3vl_4b_bf16.safetensors` | Qwen3-VL-4B text encoder |
+| `vae/qwen_image_vae.safetensors` | VAE |
+| `loras/atmospheric photography.safetensors` | LoRA (strength 0.6) |
+| `upscale_models/4xNomosWebPhoto_RealPLKSR.pth` | 4× ESRGAN-style upscaler |
+| `SEEDVR2/seedvr2_ema_7b_fp16.safetensors` | SeedVR2 7B DiT |
+| `SEEDVR2/ema_vae_fp16.safetensors` | SeedVR2 video VAE |
 
 ---
 
-## What was ported
+## Pipeline architecture
 
-Every node of `krea2.json` (38 nodes, 21 functional) is re-implemented from the
-corresponding ComfyUI / custom-node source:
-
-| Workflow node | Implementation |
+| Operation | Implementation |
 | --- | --- |
-| `UNETLoader`, `CLIPLoader`, `VAELoader`, `UpscaleModelLoader` | `loaders.py` |
-| `Power Lora Loader (rgthree)` | `lora.py` (weights merged in place: `W += s·B·A`) |
-| `CLIPTextEncode` (Krea 2 / Qwen3-VL) | `models/text_encoder.py` |
-| `EmptyLatentImage`, `KSamplerAdvanced`, `VAEDecode` | `pipeline.py`, `sampling.py`, `models/{dit,vae}.py` |
-| `ResolutionSelector`, `SimpleMath+`, `Text Load Line From File`, `Image Saver` | `nodes.py` |
-| `ColorMatch` | `color_match.py` (independent, optional color-transfer stage) |
-| `ImageBlend` plus its separate model upscaler | `blend.py` (independent, optional final stage) |
-| `ImageScale`, `GetImageSize`, `ImageUpscaleWithModel` | `imageutil.py`, `upscale.py` |
-| `UltimateSDUpscale` | `usdu.py` (Chess/Linear tiling, seam fix, mask blur, padding) |
-| `SeedVR2LoadDiTModel` / `SeedVR2LoadVAEModel` / `SeedVR2VideoUpscaler` | `seedvr2/` (see below) |
-| `Seed`, `PrimitiveInt`, `FloatConstant`, `GetNode`/`SetNode`, notes, bypassers | folded into `WorkflowConfig` |
-| `ConditioningZeroOut` | not needed — `cfg == 1` skips the unconditional pass |
+| Model and LoRA loading | `loaders.py`, `lora.py` |
+| Qwen3-VL text conditioning | `models/text_encoder.py` |
+| Krea 2 sampling and VAE | `pipeline.py`, `sampling.py`, `models/{dit,vae}.py` |
+| Resolution, metadata, and image saving | `nodes.py` |
+| Optional standalone color transfer | `color_match.py` |
+| Optional model upscale and final blend | `blend.py` |
+| Tiled image upscaling | `imageutil.py`, `upscale.py`, `usdu.py` |
+| SeedVR2 diffusion upscaling | `seedvr2/` |
 
-The graph itself lives in `workflow.py`; `WorkflowConfig` carries **every widget
-value of the original JSON** as a default, so `run_workflow()` with no arguments
-is the original workflow (only the prompt differs, see *Prompts* below).
+`workflow.py` orchestrates these independent stages. `WorkflowConfig` contains
+their defaults and exposes every setting through Python, CLI flags, and TOML.
 
 ### SeedVR2
 
-`src/krea2pipe/seedvr2/` is a **first-party port of the official
-[ByteDance-Seed/SeedVR](https://github.com/ByteDance-Seed/SeedVR) code**
-(Apache-2.0, `seedvr2/LICENSE`), not a wrapper around the ComfyUI custom node.
+`src/krea2pipe/seedvr2/` embeds the official
+[ByteDance-Seed/SeedVR](https://github.com/ByteDance-Seed/SeedVR) implementation
+(Apache-2.0, `seedvr2/LICENSE`) directly.
 `runner.py` mirrors `projects/inference_seedvr2_7b.py`. Deviations from
 upstream, all documented in `seedvr2/__init__.py`:
 
@@ -114,28 +104,23 @@ upstream, all documented in `seedvr2/__init__.py`:
 * apex `FusedLayerNorm`/`FusedRMSNorm` → torch equivalents (`FusedRMSNormCompat`
   keeps the checkpoint key names).
 * `.safetensors` checkpoints (including the fp8 releases) are loadable.
-* `color_fix.py` and the `max_resolution` long-edge cap reproduce the ComfyUI
-  node's `color_correction='lab'` and resolution semantics, which the official
-  repo does not have.
+* `color_fix.py` provides selectable correction, and `max_resolution` caps the
+  long edge.
 * `vae/tiling.py` adds spatial VAE tiling (`encode_tiled`/`decode_tiled`, on by
-  default with the 1024/128 tile of `krea2.json`). The official repo always runs
+  default with a 1024/128 tile). The official repo always runs
   the VAE on the whole frame, which costs ~10 s and 35 GB more at 4096².
-
-It is ~8× faster than the ComfyUI node here (9.3 s vs 73 s for 512²→1024²)
-because the node block-swaps 36 layers to the CPU to fit small GPUs.
 
 ---
 
 ## Validation
 
-The port was checked numerically against the **real ComfyUI 0.30.0** running the
-same graph (`tools/comfy_reference.py`) and against the SeedVR2 custom node
-(`tools/seedvr2_parity.py`):
+The pipeline was checked numerically against independent reference execution
+and the official SeedVR2 implementation:
 
 | Stage | Metric | Result |
 | --- | --- | --- |
 | `CLIPTextEncode` | cosine similarity of the conditioning | **0.999985** |
-| `KSamplerAdvanced` (1 step) | latent cosine similarity | **0.99995** (1248²) |
+| Diffusion sampler (1 step) | latent cosine similarity | **0.99995** (1248²) |
 | base image (8 steps) | mean abs pixel difference | **3.97 / 255** |
 | `UltimateSDUpscale` | mean abs pixel difference | **0.35 / 255** |
 | scheduler sigmas | `sgm_uniform`, `simple`, `normal`, … | exact match |
@@ -154,11 +139,10 @@ difference, which is why the base image sits at ~4/255 while a single step is at
 ```bash
 uv run pytest                       # CPU + real-model GPU tests
 uv run pytest -m gpu                # just the 13 end-to-end GPU tests, ~60 s
-KREA2_PARITY=1 uv run pytest -m gpu # + the two ComfyUI cross-checks, ~40 s
+KREA2_PARITY=1 uv run pytest -m gpu # include development reference checks
 ```
 
-The GPU tests are skipped automatically when there is no CUDA device or no
-`COMFYUI_ROOT` model tree.
+GPU tests are skipped automatically when CUDA or `KREA2_MODEL_ROOT` is absent.
 
 CPU tests cover the node maths (ResolutionSelector → 1248², `SimpleMath+` tile
 sizes, prompt-line wraparound, blend modes, colour matching, EXIF metadata),
@@ -171,20 +155,15 @@ determinism, shapes, ranges and the tolerances above.
 
 ## Performance (A100 80 GB, defaults)
 
-| Stage | Output | ComfyUI warm | krea2pipe warm |
-| --- | --- | --- | --- |
-| text encode | — | 1.0 s | 1.3 s |
-| Krea 2 sampling + VAE decode | 1248² | 9.4 s | **6.9 s** |
-| UltimateSDUpscale ×2 (Chess, 1344² tiles) | 2496² | 15.1 s | **14.1 s** |
-| ColorMatch (hm-mkl-hm, 0.22) | 2496² | 2.1 s | 2.2 s |
-| SeedVR2 (7B) | 4096² | 21.1 s | **19.3 s** |
-| 4× model upscale + Lanczos + blend 0.4 | 4096² | 11.0 s | **7.4 s** |
-| **total** | **4096²** | **59.6 s**, 41.9 GB | **51.6 s**, 47.5 GB |
-
-The ComfyUI column comes from `tools/comfy_reference.py --stage full` on the
-same machine and the same graph. It **excludes model loading** (ComfyUI keeps
-the UNet/CLIP/VAE/upscaler resident between runs). The fair comparison is
-therefore warm-to-warm: krea2pipe is about **8 seconds faster**.
+| Stage | Output | Warm time |
+| --- | --- | ---: |
+| text encode | — | 1.3 s |
+| Krea 2 sampling + VAE decode | 1248² | 6.9 s |
+| Ultimate SD upscale ×2 (Chess, 1344² tiles) | 2496² | 14.1 s |
+| ColorMatch (hm-mkl-hm, 0.22) | 2496² | 2.2 s |
+| SeedVR2 (7B) | 4096² | 19.3 s |
+| 4× model upscale + Lanczos + blend 0.4 | 4096² | 7.4 s |
+| **total** | **4096²** | **51.6 s**, 47.5 GB |
 
 The first image after service startup is about **78 s** because checkpoints and
 compiled kernels must be loaded. Every later image is about **51.6 s**. The
@@ -204,40 +183,23 @@ batch-1 DiT numerics. The saver writes `_00`, `_01`, … suffixes.
 | 2 | 99.7 s | 49.9 s | 47.6 GB |
 | 4 | **191.8 s** | **48.0 s** | 53.5 GB |
 
-The batch-4 result was verified as `(4, 4096, 4096, 3)`. Unpatched ComfyUI
-reports 183.0 s for the same nominal batch, but its Krea image VAE interprets
-the IMAGE batch as one video. Wan VAE rounds four frames down to the valid
-`4n+1` prefix of one, so tracing shows four images in `shared.batch` but USDU
-latent/sample shapes of `(1, 16, 1, 180, 180)` and a decoded batch of one.
-Consequently only image 0 receives tile diffusion. This is
-[ComfyUI issue #14039](https://github.com/Comfy-Org/ComfyUI/issues/14039);
-[PR #14269](https://github.com/Comfy-Org/ComfyUI/pull/14269) proposes the same
-independent-image layout used here.
-
-Applying that fix to the reference (`vae.not_video = True`) produces real
-latent/sample batches of `(4, 16, 1, 180, 180)` and decodes four images for
-every tile. Corrected batch-4 USDU takes **59.3 s** in ComfyUI versus **54.6 s**
-in krea2pipe, so there is no equivalent-work performance deficit. The
-uncorrected 23.3 s ComfyUI USDU timing is faster only because it diffuses one
-image. The USDU node's own `batch_size=1` controls how many tile coordinates
-are grouped and is not the cause.
+The batch-4 result was verified as `(4, 4096, 4096, 3)`. Every image is encoded
+as an independent one-frame VAE input and receives tile diffusion.
 
 ### Where the time went
 
-A naive port of the *official* SeedVR repository took **88 s / 62.8 GB**. Five
-things closed the gap:
+Baseline official SeedVR inference took **88 s / 62.8 GB**. Five optimizations
+reduced that cost:
 
 1. **cuDNN `Conv3d` workaround** (`conv3d_compat.py`, ~9 s). PyTorch 2.9/2.10
    built against cuDNN ≥ 9.10.2 dispatch fp16/bf16 `Conv3d` through a path that
    uses ~3× the memory and is much slower. Calling `torch.cudnn_convolution`
-   directly avoids it. `ComfyUI-SeedVR2_VideoUpscaler` ships the same
-   workaround (`src/optimization/compatibility.py`); both VAEs in this project
-   are `Conv3d`-based, so it helps the Krea 2 VAE too.
+   directly avoids it. Both VAEs are `Conv3d`-based, so the optimization also
+   helps the Krea 2 VAE.
    SeedVR2 VAE encode 5.9 → 3.6 s, decode 12.8 → 7.8 s.
 2. **Spatial VAE tiling** (`seedvr2/vae/tiling.py`, ~10 s and 35 GB). The
-   official repo only has whole-frame VAE; `krea2.json` asks for 1024 px tiles
-   with a 128 px overlap. Our output is bit-identical to the node's tiled decode
-   (mean |Δ| 0.0000/255, corr 1.0).
+   official repo only has whole-frame VAE. The default uses 1024 px tiles with
+   128 px overlap and is numerically stable.
 3. **numpy pin** (~1.5 s). `color-matcher`'s `hm-mkl-hm` transfer is ~1.7×
    slower on numpy ≥ 2.4 (5.9 s vs 3.5 s on a 2496² image), so `pyproject.toml`
    caps it at `<2.4`.
@@ -252,7 +214,7 @@ things closed the gap:
 SageAttention 2.2 was built locally and measured at the real Krea2 shape
 (48 heads, head dimension 128, about 6.6K tokens): **5.81 ms SDPA vs 5.31 ms
 Sage**, only 1.09× at the attention kernel and under one second end-to-end.
-It also changes attention output (correlation 0.99993), so the port deliberately
+It also changes attention output (correlation 0.99993), so the pipeline deliberately
 keeps exact PyTorch SDPA. FlashAttention 2 and xFormers use effectively the same
 kernel path as modern PyTorch SDPA on this A100.
 
@@ -271,14 +233,15 @@ uv run krea2pipe /data/krea2/prompts
 After an image is saved, its absolute source filename, line number and content
 digest are fsynced to `OUTPUT_DIR/.krea2pipe-progress.tsv`. If the process or
 machine stops mid-image, that line is not marked; the next run safely retries
-it. Completed lines are never rendered twice, while an edited line is treated
-as new work. New files and appended lines are picked up by service/watch mode.
+it. Completed ledger entries are not rendered again, while an edited line is
+treated as new work. New files and appended lines are picked up by
+service/watch mode.
 
 The recommended service configuration is TOML:
 
 ```bash
 uv run krea2pipe --generate-config
-# edit source and output-dir, then:
+# edit source, output-dir, and model-root, then:
 sudo cp deploy/krea2pipe.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now krea2pipe
@@ -296,6 +259,7 @@ Common service settings use concise values and support independent sampling
 controls:
 
 ```toml
+model-root = "/data/models"
 aspect-ratio = "16:9"
 seed = "random"
 sampler = "euler_ancestral"
@@ -335,10 +299,34 @@ The standalone ColorMatch stage supports `default`, `hm`, `reinhard`, `mvgd`,
 either `run-color-match = false` or `run-blend = false` to bypass that module.
 
 The supplied unit keeps the `torch.compile` cache under
-`/var/cache/krea2pipe`, so it survives a reboot, and restarts after a failure.
-Adjust its `User`, paths and config before installing it on another account.
-Future AI prompt generation can simply append lines or write new text files to
-the watched source directory; the renderer and resume mechanism need no change.
+`/var/cache/krea2pipe`, so it survives a reboot. It restarts after transient
+failures but stops after three failures in five minutes instead of looping on
+a bad configuration. Adjust its `User`, paths and config before installing it
+on another account. Future AI prompt generation can simply append lines or
+write new text files to the watched source directory; the renderer and resume
+mechanism need no change.
+
+### Production failure handling and logging
+
+Before loading weights, the application validates numeric settings, CUDA
+availability, every checkpoint needed by enabled stages, and output-directory
+access. Saved images are written to a temporary file, fsynced, and atomically
+renamed. An exclusive output-directory lock prevents a service and a manual run
+from writing the same resume ledger concurrently.
+
+Each stage logs elapsed time and peak allocated CUDA memory. A CUDA allocation
+failure identifies the failed stage, current batch and base resolution, and
+the relevant settings to reduce. The application deliberately does not
+silently split a batch because doing so can change numerical results; the
+active prompt remains pending and can be retried after adjusting the config.
+Color-transfer failures and output errors are also fatal rather than producing
+a success-shaped fallback.
+
+Console logging defaults to `INFO` and is available through `journalctl` under
+systemd. Set `log-level = "DEBUG"` for diagnostics or configure
+`log-file = "/data/krea2/logs/krea2pipe.log"` for an additional rotating log
+(10 MiB per file, five backups). A clean interruption exits with status 130
+without marking the active prompt complete.
 
 ---
 
@@ -346,7 +334,7 @@ the watched source directory; the renderer and resume mechanism need no change.
 
 ```
 src/krea2pipe/
-  workflow.py      the krea2.json graph (WorkflowConfig / run_workflow)
+  workflow.py      stage orchestration (WorkflowConfig / run_workflow)
   color_match.py   optional standalone color-transfer stage
   blend.py         optional model-upscale / Lanczos / blend stage
   cli.py           `krea2pipe` command line entry point
@@ -356,18 +344,15 @@ src/krea2pipe/
   pipeline.py      Krea2Pipeline: encode / sample / decode
   sampling.py      ModelSamplingFlux, schedulers, euler & euler_ancestral
   models/          dit.py (Krea 2 single-stream DiT), vae.py (Wan VAE), text_encoder.py
-  loaders.py       ComfyUI-format checkpoint loading
-  lora.py          rgthree Power Lora Loader
-  nodes.py         small utility nodes (resolution, math, colour, blend, saver)
+  loaders.py       model-root checkpoint loading
+  lora.py          LoRA weight merging
+  nodes.py         resolution, arithmetic, metadata, and saving utilities
   imageutil.py     tensor/PIL helpers, common_upscale, tiled_scale
   upscale.py       ImageUpscaleWithModel (spandrel + tiling)
   usdu.py          UltimateSDUpscale
   conv3d_compat.py cuDNN Conv3d fast path (see "Where the time went")
-  seedvr2/         port of the official SeedVR2 (Apache-2.0)
-    vae/tiling.py  spatial tiled VAE encode/decode (from the ComfyUI node)
-tools/
-  comfy_reference.py   headless real-ComfyUI reference renders
-  seedvr2_parity.py    SeedVR2 port vs ComfyUI node comparison
+  seedvr2/         embedded official SeedVR2 implementation (Apache-2.0)
+    vae/tiling.py  spatial tiled VAE encode/decode
 tests/               pytest suite (CPU + opt-in GPU)
 ```
 
@@ -375,7 +360,6 @@ tests/               pytest suite (CPU + opt-in GPU)
 
 * `src/krea2pipe/seedvr2/` — derived from ByteDance-Seed/SeedVR, Apache-2.0
   (licence retained in that directory).
-* The remaining node ports follow the algorithms of ComfyUI (GPL-3.0) and its
-  custom nodes (ComfyUI_UltimateSDUpscale, KJNodes, rgthree-comfy,
-  ComfyUI_essentials, WAS Node Suite, ComfyUI-Image-Saver).
 * Krea 2 model reference: <https://github.com/krea-ai/krea-2>.
+* Additional provenance and development-only reference tooling are documented
+  in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,11 +1,7 @@
-"""Qwen-Image VAE (Wan2.1 architecture) - image-only inference path.
+"""Qwen-Image VAE using the Wan2.1 architecture for still-image inference.
 
-ComfyUI loads ``qwen_image_vae.safetensors`` through ``comfy/ldm/wan/vae.py`` (WanVAE,
-dim=96, z_dim=16, dim_mult=[1,2,4,4]).  For still images the latent has a single temporal
-frame, in which case ComfyUI runs the encoder/decoder without the temporal feature cache -
-that also means the ``upsample3d``/``downsample3d`` temporal convolutions are skipped.
-This port reproduces exactly that path (T == 1) and keeps checkpoint key names identical
-so the state dict loads verbatim.
+Still-image latents have one temporal frame, so temporal feature caching and
+temporal up/downsampling are unnecessary. Checkpoint key names remain unchanged.
 """
 
 from __future__ import annotations
@@ -75,7 +71,7 @@ class Resample(nn.Module):
             self.resample = nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
-        # Temporal convolutions are only active in ComfyUI's cached (multi-frame) path.
+        # Temporal convolutions are only active for cached multi-frame inference.
         t = x.shape[2]
         x = rearrange(x, "b c t h w -> (b t) c h w")
         x = self.resample(x)
@@ -213,18 +209,18 @@ class WanVAE(nn.Module):
 
     def encode(self, x: Tensor) -> Tensor:
         """x: (B, 3, 1, H, W) in [-1, 1] -> mu (B, 16, 1, H/8, W/8)."""
-        assert x.shape[2] == 1, "image-only VAE port supports a single frame"
+        assert x.shape[2] == 1, "image-only VAE supports a single frame"
         out = self.encoder(x)
         mu, _log_var = self.conv1(out).chunk(2, dim=1)
         return mu
 
     def decode(self, z: Tensor) -> Tensor:
         """z: (B, 16, 1, h, w) -> (B, 3, 1, h*8, w*8) in [-1, 1]."""
-        assert z.shape[2] == 1, "image-only VAE port supports a single frame"
+        assert z.shape[2] == 1, "image-only VAE supports a single frame"
         return self.decoder(self.conv2(z))
 
 
-# --- Wan2.1 latent format (comfy/latent_formats.py :: Wan21) -----------------------------
+# --- Wan2.1 latent format --------------------------------------------------------------
 
 LATENTS_MEAN = [
     -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,

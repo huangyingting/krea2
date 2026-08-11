@@ -70,3 +70,14 @@ def test_seed_offset_is_stable(tmp_path):
     first = next(batch.iter_prompts(file))
     second = next(batch.iter_prompts(file))
     assert first.seed_offset == second.seed_offset
+
+
+def test_output_lock_rejects_a_concurrent_renderer(tmp_path):
+    with batch.OutputLock(tmp_path):
+        with pytest.raises(batch.AlreadyRunningError, match="another krea2pipe process"):
+            with batch.OutputLock(tmp_path):
+                pass
+
+    # Releasing the first lock makes the output directory available again.
+    with batch.OutputLock(tmp_path):
+        pass

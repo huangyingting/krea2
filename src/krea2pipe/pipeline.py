@@ -1,15 +1,4 @@
-"""The Krea 2 diffusion pipeline (UNETLoader + LoRA + CLIP + VAE + KSampler nodes).
-
-This is the pure-python equivalent of the ComfyUI sub-graph::
-
-    UNETLoader -> Power Lora Loader (rgthree) -> KSamplerAdvanced -> VAEDecode
-    CLIPLoader -> CLIPTextEncode -> (ConditioningZeroOut)
-    VAELoader ->  EmptyLatentImage
-
-``cfg`` is 1.0 in the workflow, which makes ComfyUI skip the unconditional pass
-entirely (``comfy/samplers.py``: ``if math.isclose(cond_scale, 1.0) ...``), so the
-negative conditioning is never evaluated - the same shortcut is taken here.
-"""
+"""Krea 2 diffusion pipeline: LoRAs, text conditioning, sampling, and VAE."""
 
 from __future__ import annotations
 
@@ -30,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Krea2Models:
+    model_root: str = loaders.DEFAULT_MODEL_ROOT
     unet_name: str = "moodyKrea2Mix_v50BF16.safetensors"
     clip_name: str = "qwen3vl_4b_bf16.safetensors"
     vae_name: str = "qwen_image_vae.safetensors"
@@ -54,11 +44,15 @@ class Krea2Pipeline:
     @property
     def dit(self) -> SingleStreamDiT:
         if self._dit is None:
-            self._dit = loaders.load_dit(self.config.unet_name, self.device, self.dtype)
+            self._dit = loaders.load_dit(
+                self.config.unet_name, self.device, self.dtype, self.config.model_root
+            )
             for lora_name, strength in self.config.loras:
                 from .lora import apply_lora, load_lora_file
 
-                path = loaders.resolve_model("loras", lora_name)
+                path = loaders.require_model(
+                    "loras", lora_name, self.config.model_root, f"LoRA {lora_name!r}"
+                )
                 apply_lora(self._dit, load_lora_file(path), strength)
             # After the LoRA is merged the weights are static, so the blocks can
             # be compiled once and reused by every layer, step and tile size.
@@ -68,14 +62,16 @@ class Krea2Pipeline:
     @property
     def vae(self) -> WanVAE:
         if self._vae is None:
-            self._vae = loaders.load_vae(self.config.vae_name, self.device, self.dtype)
+            self._vae = loaders.load_vae(
+                self.config.vae_name, self.device, self.dtype, self.config.model_root
+            )
         return self._vae
 
     @property
     def text_encoder(self):
         if self._text_encoder is None:
             self._text_encoder = loaders.load_text_encoder(
-                self.config.clip_name, self.device, self.dtype
+                self.config.clip_name, self.device, self.dtype, self.config.model_root
             )
         return self._text_encoder
 
@@ -152,10 +148,10 @@ class Krea2Pipeline:
         add_noise: bool = True,
         disable_pbar: bool = False,
     ) -> Tensor:
-        """``KSamplerAdvanced`` / ``KSampler`` (cfg == 1 -> no unconditional pass)."""
+        """Sample a latent batch (cfg == 1 skips the unconditional pass)."""
         if cfg != 1.0:
             raise NotImplementedError(
-                "the ported workflow always runs at cfg=1.0 (ComfyUI skips the uncond pass)"
+                "the default pipeline runs at cfg=1.0 and skips negative guidance"
             )
         sigmas = sampling.calculate_sigmas(self.model_sampling, scheduler, steps, denoise)
         sigmas = sampling.slice_sigmas(sigmas, start_step, last_step, force_full_denoise)

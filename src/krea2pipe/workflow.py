@@ -1,36 +1,14 @@
-"""The complete ``krea2.json`` graph, node for node.
-
-Execution order (matching the ComfyUI topological order)::
-
-    Text Load Line From File ─┐
-    ResolutionSelector ───────┤
-                              ├─> CLIPTextEncode ─> KSamplerAdvanced ─> VAEDecode
-    UNETLoader -> Power Lora ─┘                          (node 31, "base")
-                                                              │
-              ┌───────────────────────────────────────────────┤
-              │                                               ▼
-              │                                    UltimateSDUpscale (node 73)
-              │                                               │
-              └──────────────> ColorMatch(hm-mkl-hm, 0.22) <──┘
-                                        │
-                    ┌───────────────────┴──────────────────┐
-                    ▼                                      ▼
-        SeedVR2VideoUpscaler (node 66)        ImageUpscaleWithModel (4xNomos)
-                    │                                      │
-                    │                            ImageScale(lanczos, W/H of SeedVR2)
-                    │                                      │
-                    └──────────> ImageBlend(0.4, normal) <─┘
-                                        │
-                                   Image Saver
-"""
+"""Standalone Krea 2 generation and modular upscaling workflow."""
 
 from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
 import time
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import torch
@@ -40,6 +18,7 @@ from . import accel, blend, color_match, loaders, nodes, usdu
 from .imageutil import get_image_size
 from .pipeline import Krea2Models, Krea2Pipeline
 from .seedvr2 import SeedVR2Config
+from .validation import preflight
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +31,14 @@ DEFAULT_PROMPT = (
 
 @dataclass
 class WorkflowConfig:
-    """Every widget value of ``krea2.json``, overridable."""
+    """Configuration for every standalone pipeline stage."""
 
-    # --- prompt (node 6 CLIPTextEncode) ---
+    # --- prompt ---
     prompt: Optional[str] = None
     negative_prompt: str = ""
 
-    # --- models (nodes 12 / 38 / 10 / 51 Power Lora Loader) ---
+    # --- models ---
+    model_root: str = loaders.DEFAULT_MODEL_ROOT
     unet_name: str = "moodyKrea2Mix_v50BF16.safetensors"
     clip_name: str = "qwen3vl_4b_bf16.safetensors"
     vae_name: str = "qwen_image_vae.safetensors"
@@ -68,7 +48,7 @@ class WorkflowConfig:
     upscale_model_name: str = "4xNomosWebPhoto_RealPLKSR.pth"
     blend_upscale_model_name: str = "4xNomosWebPhoto_RealPLKSR.pth"
 
-    # --- resolution (node 43 ResolutionSelector -> EmptyLatentImage) ---
+    # --- resolution ---
     aspect_ratio: str = "1:1"
     megapixels: float = 1.5
     multiple_of: int = 32
@@ -76,14 +56,14 @@ class WorkflowConfig:
     width: Optional[int] = None     # explicit override of ResolutionSelector
     height: Optional[int] = None
 
-    # --- KSamplerAdvanced (node 3) ---
+    # --- base sampling ---
     seed: int = 1099257494857840
     steps: int = 8
     cfg: float = 1.0
     sampler_name: str = "euler_ancestral"
     scheduler: str = "sgm_uniform"
 
-    # --- UltimateSDUpscale (node 73) + SimpleMath+ tile size (node 62) ---
+    # --- tiled diffusion upscale ---
     usdu_seed: int = 82616517812345
     usdu_steps: int = 2
     usdu_cfg: float = 1.0
@@ -96,19 +76,19 @@ class WorkflowConfig:
     usdu_tile_padding: int = 96
     usdu_force_uniform_tiles: bool = True
 
-    # --- ColorMatch (node 61) ---
+    # --- color match ---
     color_match_method: str = "hm-mkl-hm"
     color_match_strength: float = 0.22
     run_color_match: bool = True
 
-    # --- SeedVR2 (nodes 64 / 65 / 66) ---
+    # --- SeedVR2 ---
     seedvr2: SeedVR2Config = field(default_factory=SeedVR2Config)
 
-    # --- ImageBlend (node 71) ---
+    # --- final blend ---
     blend_factor: float = 0.4
     blend_mode: str = "normal"
 
-    # --- Image Saver (node 74) ---
+    # --- image output ---
     output_dir: str = "output"
     filename: str = "%time"
     subdir: str = "AIKC"
@@ -153,6 +133,10 @@ class WorkflowResult:
     timings: dict[str, float] = field(default_factory=dict)
 
 
+class PipelineOutOfMemoryError(RuntimeError):
+    """A CUDA allocation failure annotated with the active pipeline stage."""
+
+
 class _Timer:
     def __init__(self, sink: dict[str, float], name: str):
         self.sink, self.name = sink, name
@@ -161,10 +145,62 @@ class _Timer:
         self.t0 = time.perf_counter()
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc_value, traceback):
         self.sink[self.name] = time.perf_counter() - self.t0
-        logger.info("%s: %.1fs", self.name, self.sink[self.name])
+        if exc_type is None:
+            logger.info("%s: %.1fs", self.name, self.sink[self.name])
+        else:
+            logger.warning(
+                "%s failed after %.1fs: %s",
+                self.name,
+                self.sink[self.name],
+                exc_value,
+            )
         return False
+
+
+def _oom_message(stage: str, cfg: WorkflowConfig, width: int, height: int) -> str:
+    current = f"batch-size={cfg.batch_size}, base-resolution={width}x{height}"
+    if stage == "seedvr2":
+        advice = (
+            "reduce batch-size, seedvr2-resolution, or seedvr2-max-resolution; "
+            "a smaller SeedVR2 VAE tile can also reduce peak memory"
+        )
+    elif stage in {"usdu", "blend"}:
+        advice = (
+            "reduce batch-size, the base resolution/megapixels, or the upscale factor; "
+            f"you can also disable the {stage} stage"
+        )
+    else:
+        advice = "reduce batch-size or the base resolution/megapixels"
+    return f"CUDA out of memory during {stage} ({current}); {advice}"
+
+
+@contextmanager
+def _stage(timings: dict[str, float], name: str, cfg: WorkflowConfig,
+           width: int, height: int):
+    device = torch.device(cfg.device)
+    track_cuda = device.type == "cuda" and torch.cuda.is_available()
+    if track_cuda:
+        torch.cuda.reset_peak_memory_stats(device)
+    try:
+        with _Timer(timings, name):
+            yield
+        if track_cuda:
+            peak_gib = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+            logger.info("%s peak CUDA memory: %.2f GiB", name, peak_gib)
+    except torch.cuda.OutOfMemoryError as exc:
+        memory = ""
+        if track_cuda:
+            allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
+            memory = f" (allocated={allocated:.2f} GiB, reserved={reserved:.2f} GiB)"
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise PipelineOutOfMemoryError(
+            _oom_message(name, cfg, width, height) + memory
+        ) from exc
 
 
 def _prefetch(fn: Callable[[], object]) -> Callable[[], None]:
@@ -177,7 +213,7 @@ def _prefetch(fn: Callable[[], object]) -> Callable[[], None]:
     def run() -> None:
         try:
             fn()
-        except BaseException:  # pragma: no cover - retried synchronously
+        except Exception:  # pragma: no cover - retried synchronously
             logger.debug("prefetch failed, falling back to inline loading",
                          exc_info=True)
 
@@ -194,6 +230,7 @@ _UPSCALERS: dict[tuple, object] = {}
 
 def _cached_pipeline(cfg: WorkflowConfig) -> Krea2Pipeline:
     models = Krea2Models(
+        model_root=cfg.model_root,
         unet_name=cfg.unet_name,
         clip_name=cfg.clip_name,
         vae_name=cfg.vae_name,
@@ -201,8 +238,8 @@ def _cached_pipeline(cfg: WorkflowConfig) -> Krea2Pipeline:
         device=cfg.device,
         dtype=cfg.dtype,
     )
-    key = (models.unet_name, models.clip_name, models.vae_name, tuple(models.loras),
-           models.device, str(models.dtype))
+    key = (models.model_root, models.unet_name, models.clip_name, models.vae_name,
+           tuple(models.loras), models.device, str(models.dtype))
     pipe = _PIPELINES.get(key)
     if pipe is None:
         _PIPELINES.clear()          # only ever keep one set of weights resident
@@ -210,13 +247,13 @@ def _cached_pipeline(cfg: WorkflowConfig) -> Krea2Pipeline:
     return pipe
 
 
-def _cached_upscale_model(model_name: str, device: str):
-    key = (model_name, device)
+def _cached_upscale_model(model_name: str, device: str, model_root: str):
+    key = (model_root, model_name, device)
     model = _UPSCALERS.get(key)
     if model is None:
         _UPSCALERS.clear()
         model = _UPSCALERS.setdefault(
-            key, loaders.load_upscale_model(model_name, device))
+            key, loaders.load_upscale_model(model_name, device, model_root))
     return model
 
 
@@ -233,8 +270,9 @@ def release_models() -> None:
 
 def run_workflow(config: WorkflowConfig | None = None,
                  progress: Callable[[str], None] | None = None) -> WorkflowResult:
-    """Execute the whole graph and return the final image (plus intermediates)."""
+    """Execute the pipeline and return the final image plus intermediates."""
     cfg = config or WorkflowConfig()
+    preflight(cfg)
     accel.tune_backends()
     say = progress or (lambda msg: logger.info("%s", msg))
     timings: dict[str, float] = {}
@@ -252,16 +290,14 @@ def run_workflow(config: WorkflowConfig | None = None,
     # ``import transformers`` that the text encoder triggers.
     prefetch = _prefetch(lambda: pipe.dit)
 
-    # --- CLIPLoader + CLIPTextEncode ---------------------------------------
     say("[1/6] encoding prompt")
-    with _Timer(timings, "text_encode"):
+    with _stage(timings, "text_encode", cfg, width, height):
         cond = pipe.encode_prompt(prompt)
         pipe.free_text_encoder()
     prefetch()
 
-    # --- KSamplerAdvanced + VAEDecode --------------------------------------
     say(f"[2/6] sampling {cfg.steps} steps @ {width}x{height} (seed {cfg.seed})")
-    with _Timer(timings, "base_sample"):
+    with _stage(timings, "base_sample", cfg, width, height):
         latent = pipe.empty_latent(width, height, cfg.batch_size)
         samples = pipe.sample(
             cond, latent, cfg.seed, cfg.steps, cfg.cfg,
@@ -270,18 +306,18 @@ def run_workflow(config: WorkflowConfig | None = None,
         base = pipe.vae_decode(samples)
     stages["base"] = base
 
-    # --- UltimateSDUpscale --------------------------------------------------
     if cfg.run_usdu:
         bw, bh, _ = get_image_size(base)
-        # SimpleMath+ nodes 62 / 63: "(a*b + (96 * 2))/2"
         tile_w = nodes.simple_math("(a*b + (96 * 2))/2", a=bw, b=cfg.usdu_upscale_by)[0]
         tile_h = nodes.simple_math("(a*b + (96 * 2))/2", a=bh, b=cfg.usdu_upscale_by)[0]
         say(
             f"[3/6] UltimateSDUpscale x{cfg.usdu_upscale_by} "
             f"(tiles {tile_w}x{tile_h}, {cfg.usdu_mode}, seed {cfg.usdu_seed})"
         )
-        with _Timer(timings, "usdu"):
-            upscale_model = _cached_upscale_model(cfg.upscale_model_name, cfg.device)
+        with _stage(timings, "usdu", cfg, width, height):
+            upscale_model = _cached_upscale_model(
+                cfg.upscale_model_name, cfg.device, cfg.model_root
+            )
             params = usdu.USDUParams(
                 upscale_by=cfg.usdu_upscale_by,
                 seed=cfg.usdu_seed,
@@ -305,10 +341,9 @@ def run_workflow(config: WorkflowConfig | None = None,
         upscaled = base
     stages["usdu"] = upscaled
 
-    # --- ColorMatch ---------------------------------------------------------
     if cfg.run_color_match:
         say(f"[4/6] ColorMatch {cfg.color_match_method} @ {cfg.color_match_strength}")
-        with _Timer(timings, "color_match"):
+        with _stage(timings, "color_match", cfg, width, height):
             matched = color_match.color_match(
                 base, upscaled, cfg.color_match_method, cfg.color_match_strength
             )
@@ -322,25 +357,30 @@ def run_workflow(config: WorkflowConfig | None = None,
     gc.collect()
     torch.cuda.empty_cache()
 
-    # --- SeedVR2VideoUpscaler ----------------------------------------------
     if cfg.run_seedvr2:
         say(f"[5/6] SeedVR2 -> {cfg.seedvr2.resolution}px")
-        with _Timer(timings, "seedvr2"):
+        with _stage(timings, "seedvr2", cfg, width, height):
             from .seedvr2 import seedvr2_upscale
 
-            seed_out = seedvr2_upscale(matched, cfg.seedvr2)
+            seedvr2_cfg = cfg.seedvr2
+            if seedvr2_cfg.model_dir is None:
+                seedvr2_cfg = replace(
+                    seedvr2_cfg, model_dir=os.path.join(cfg.model_root, "SEEDVR2")
+                )
+            seed_out = seedvr2_upscale(matched, seedvr2_cfg)
         stages["seedvr2"] = seed_out
     else:
         say("[5/6] SeedVR2 skipped")
         seed_out = matched
 
-    # --- ImageUpscaleWithModel -> ImageScale -> ImageBlend ------------------
     if cfg.run_blend and cfg.run_seedvr2:
         target_w, target_h, _ = get_image_size(seed_out)
         say(f"[6/6] 4x model upscale + lanczos to {target_w}x{target_h} + blend {cfg.blend_factor}")
-        with _Timer(timings, "blend"):
+        with _stage(timings, "blend", cfg, width, height):
             final = blend.upscale_and_blend(
-                _cached_upscale_model(cfg.blend_upscale_model_name, cfg.device),
+                _cached_upscale_model(
+                    cfg.blend_upscale_model_name, cfg.device, cfg.model_root
+                ),
                 matched,
                 seed_out,
                 cfg.blend_factor,
@@ -354,20 +394,21 @@ def run_workflow(config: WorkflowConfig | None = None,
     out_w, out_h, _ = get_image_size(final)
     paths: list[str] = []
     if cfg.save:
-        meta = nodes.a1111_metadata(
-            prompt, cfg.negative_prompt, cfg.steps, cfg.sampler_name, cfg.cfg,
-            cfg.seed, width, height, cfg.unet_name,
-        )
-        paths = nodes.save_image(
-            final, cfg.output_dir, cfg.filename, cfg.subdir, cfg.extension,
-            cfg.quality, cfg.time_format, metadata=meta,
-        )
-        if cfg.save_intermediates:
-            for name, img in stages.items():
-                if img is final:
-                    continue
-                nodes.save_image(img, cfg.output_dir, f"{cfg.filename}_{name}",
-                                 cfg.subdir, "png", cfg.quality, cfg.time_format)
+        with _stage(timings, "save", cfg, width, height):
+            meta = nodes.a1111_metadata(
+                prompt, cfg.negative_prompt, cfg.steps, cfg.sampler_name, cfg.cfg,
+                cfg.seed, width, height, cfg.unet_name,
+            )
+            paths = nodes.save_image(
+                final, cfg.output_dir, cfg.filename, cfg.subdir, cfg.extension,
+                cfg.quality, cfg.time_format, metadata=meta,
+            )
+            if cfg.save_intermediates:
+                for name, img in stages.items():
+                    if img is final:
+                        continue
+                    nodes.save_image(img, cfg.output_dir, f"{cfg.filename}_{name}",
+                                     cfg.subdir, "png", cfg.quality, cfg.time_format)
 
     say(f"done: {out_w}x{out_h} in {sum(timings.values()):.1f}s")
     return WorkflowResult(

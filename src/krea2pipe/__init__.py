@@ -1,3 +1,3 @@
-"""Pure-python implementation of the Moody Krea2 4KHD ComfyUI workflow."""
+"""Standalone Krea 2 image-generation and upscaling pipeline."""
 
 __version__ = "0.1.0"

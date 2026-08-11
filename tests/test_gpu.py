@@ -1,13 +1,12 @@
 """End-to-end GPU tests.
 
-They need a CUDA device and the ComfyUI model tree (``COMFYUI_ROOT``, default
-``/data/ComfyUI``) and are skipped automatically otherwise::
+They need a CUDA device and model library (``KREA2_MODEL_ROOT``) and are
+skipped automatically otherwise::
 
     uv run pytest -m gpu                      # ~4 minutes on an A100 80GB
-    KREA2_PARITY=1 uv run pytest -m gpu       # + the ComfyUI cross-checks (slow)
+    KREA2_PARITY=1 uv run pytest -m gpu       # + development reference checks
 
-The tolerances asserted below were measured against the real ComfyUI running
-``krea2.json`` - see README.md ("Validation").
+The tolerances below were measured against an independent reference execution.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(scope="module")
-def pipeline(comfy_root):
+def pipeline(model_root):
     """The same process-wide pipeline ``run_workflow`` uses, so only one copy is resident."""
     from krea2pipe.workflow import WorkflowConfig, _cached_pipeline
 
@@ -81,7 +80,7 @@ def test_txt2img_small(pipeline):
     assert float(image.std()) > 0.02       # not a flat/black image
 
 
-def test_upscale_model_is_4x(comfy_root):
+def test_upscale_model_is_4x(model_root):
     from krea2pipe import loaders, upscale
 
     model = loaders.load_upscale_model("4xNomosWebPhoto_RealPLKSR.pth")
@@ -105,7 +104,7 @@ def seedvr2_input():
     ).clamp(0, 1).permute(0, 2, 3, 1).contiguous()
 
 
-def test_seedvr2_upscales_and_is_deterministic(seedvr2_input, comfy_root):
+def test_seedvr2_upscales_and_is_deterministic(seedvr2_input, model_root):
     from krea2pipe.seedvr2 import SeedVR2Config, SeedVR2Upscaler
 
     cfg = SeedVR2Config(resolution=512, max_resolution=512)
@@ -122,7 +121,7 @@ def test_seedvr2_upscales_and_is_deterministic(seedvr2_input, comfy_root):
     assert torch.equal(first, second), "same seed must give the same output"
 
 
-def test_seedvr2_respects_max_resolution(comfy_root):
+def test_seedvr2_respects_max_resolution(model_root):
     from krea2pipe.seedvr2 import SeedVR2Config, SeedVR2Upscaler
 
     torch.manual_seed(0)
@@ -137,11 +136,11 @@ def test_seedvr2_respects_max_resolution(comfy_root):
     assert out.shape[2] > out.shape[1]     # still landscape
 
 
-def test_seedvr2_tiled_vae_round_trip(comfy_root):
+def test_seedvr2_tiled_vae_round_trip(model_root):
     """Tiled encode/decode must reconstruct the image as well as the whole-frame path.
 
-    ``krea2.json`` runs the SeedVR2 VAE with 1024 px tiles / 128 px overlap; tiling
-    is what keeps the 4K stage fast, so check that the seams stay invisible.
+    The default uses 1024 px tiles with 128 px overlap; tiling keeps the 4K
+    stage fast, so check that seams remain invisible.
     """
     from krea2pipe.seedvr2 import SeedVR2Config, SeedVR2Upscaler
 
@@ -172,7 +171,7 @@ def test_seedvr2_tiled_vae_round_trip(comfy_root):
 
 
 def test_seedvr2_tiling_is_enabled_by_default():
-    """``krea2.json`` runs the SeedVR2 VAE with a 1024 px tile and 128 px overlap."""
+    """SeedVR2 defaults to a 1024 px VAE tile and 128 px overlap."""
     from krea2pipe.seedvr2 import SeedVR2Config
 
     cfg = SeedVR2Config()
@@ -197,7 +196,7 @@ def test_conv3d_workaround_matches_the_reference_kernel():
 
 # --- whole workflow ----------------------------------------------------------------
 
-def test_workflow_without_seedvr2(tmp_path, comfy_root):
+def test_workflow_without_seedvr2(tmp_path, model_root):
     from krea2pipe.workflow import WorkflowConfig, run_workflow
 
     result = run_workflow(WorkflowConfig(
@@ -216,7 +215,7 @@ def test_workflow_without_seedvr2(tmp_path, comfy_root):
 
 
 @pytest.mark.slow
-def test_workflow_all_stages(tmp_path, comfy_root):
+def test_workflow_all_stages(tmp_path, model_root):
     from krea2pipe.seedvr2 import SeedVR2Config
     from krea2pipe.workflow import WorkflowConfig, run_workflow
 
@@ -233,19 +232,22 @@ def test_workflow_all_stages(tmp_path, comfy_root):
     assert len(result.paths) == 2 and all(os.path.exists(path) for path in result.paths)
 
 
-# --- cross-checks against the real ComfyUI (opt in: KREA2_PARITY=1) ----------------
+# --- opt-in development reference checks -------------------------------------------
 
 @pytest.mark.slow
-@pytest.mark.skipif(not PARITY, reason="set KREA2_PARITY=1 to run the ComfyUI cross-checks")
-def test_base_stage_matches_comfyui(tmp_path):
-    """Same prompt/seed/steps through real ComfyUI -> same latent."""
-    comfy_python = Path(os.environ.get("COMFYUI_ROOT", "/data/ComfyUI")) / "venv" / "bin" / "python"
-    if not comfy_python.exists():
-        pytest.skip(f"{comfy_python} not found")
+@pytest.mark.skipif(not PARITY, reason="set KREA2_PARITY=1 for reference checks")
+def test_base_stage_matches_reference(tmp_path):
+    """The same prompt, seed, and steps produce a matching reference latent."""
+    reference_python = (
+        Path(os.environ.get("KREA2_REFERENCE_ROOT", "/data/reference-runtime"))
+        / "venv" / "bin" / "python"
+    )
+    if not reference_python.exists():
+        pytest.skip(f"{reference_python} not found")
 
     reference_latent = tmp_path / "ref.pt"
     subprocess.run(
-        [str(comfy_python), str(REPO / "tools" / "comfy_reference.py"),
+        [str(reference_python), str(REPO / "tools" / "reference_runtime.py"),
          "--stage", "base", "--prompt", PROMPT, "--steps", "1",
          "--width", "512", "--height", "512",
          "--out", str(tmp_path / "ref.png"), "--out-latent", str(reference_latent)],
@@ -266,12 +268,12 @@ def test_base_stage_matches_comfyui(tmp_path):
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not PARITY, reason="set KREA2_PARITY=1 to run the ComfyUI cross-checks")
-def test_seedvr2_matches_the_comfyui_node(tmp_path):
-    """The SeedVR2 port and the ComfyUI node agree given identical latents/noise."""
+@pytest.mark.skipif(not PARITY, reason="set KREA2_PARITY=1 for reference checks")
+def test_seedvr2_matches_reference(tmp_path):
+    """SeedVR2 agrees with independent execution for identical latents and noise."""
     node_root = Path(os.environ.get(
-        "SEEDVR2_NODE_ROOT",
-        "/data/ComfyUI/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler"))
+        "SEEDVR2_REFERENCE_ROOT", "/data/reference-runtime/seedvr2"
+    ))
     if not node_root.is_dir():
         pytest.skip(f"{node_root} not found")
 
@@ -285,7 +287,7 @@ def test_seedvr2_matches_the_comfyui_node(tmp_path):
     Image.fromarray((image[0].permute(1, 2, 0).numpy() * 255).astype("uint8")).save(source)
 
     out = subprocess.run(
-        [sys.executable, str(REPO / "tools" / "seedvr2_parity.py"),
+        [sys.executable, str(REPO / "tools" / "seedvr2_reference.py"),
          "--input", str(source), "--input-size", "512", "--resolution", "1024"],
         check=True, capture_output=True, text=True, cwd=str(REPO),
     )

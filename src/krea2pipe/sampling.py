@@ -1,15 +1,4 @@
-"""Sampling.
-
-Ports of the ComfyUI pieces that the workflow's two samplers rely on:
-
-* ``comfy/model_sampling.py``  -> ``ModelSamplingFlux`` + ``CONST`` prediction type
-  (Krea 2 is registered as ``ModelType.FLUX`` with ``shift=1.15``).
-* ``comfy/samplers.py``        -> ``normal_scheduler(sgm=True)`` ("sgm_uniform"),
-  ``simple_scheduler`` ("simple") and the ``denoise`` sigma slicing.
-* ``comfy/k_diffusion/sampling.py`` -> ``sample_euler_ancestral_RF`` (which is what
-  "euler_ancestral" resolves to for CONST/flow models) and ``sample_euler``.
-* ``comfy/sample.py``          -> ``prepare_noise`` (CPU generator, exact seed parity).
-"""
+"""Flow-model schedules, deterministic noise, and Euler samplers."""
 
 from __future__ import annotations
 
@@ -26,7 +15,7 @@ def flux_time_shift(mu: float, sigma: float, t):
 
 
 class ModelSamplingFlux:
-    """comfy.model_sampling.ModelSamplingFlux + CONST."""
+    """Flux-style constant prediction with shifted timesteps."""
 
     def __init__(self, shift: float = 1.15, timesteps: int = 10000):
         self.shift = shift
@@ -108,7 +97,7 @@ SCHEDULERS = {
 
 def calculate_sigmas(model_sampling: ModelSamplingFlux, scheduler: str, steps: int,
                      denoise: float | None = None) -> Tensor:
-    """comfy.samplers.KSampler.set_steps (incl. the ``denoise`` < 1 slicing)."""
+    """Calculate a schedule, including partial-denoise sigma slicing."""
     if scheduler not in SCHEDULERS:
         raise ValueError(f"unsupported scheduler {scheduler!r}")
     if denoise is None or denoise > 0.9999:
@@ -123,7 +112,7 @@ def calculate_sigmas(model_sampling: ModelSamplingFlux, scheduler: str, steps: i
 # --- noise --------------------------------------------------------------------------
 
 def prepare_noise(latent_image: Tensor, seed: int) -> Tensor:
-    """comfy.sample.prepare_noise - CPU float32 randn from a manual_seed generator."""
+    """Create deterministic CPU float32 noise from a manual seed."""
     generator = torch.manual_seed(seed)
     return torch.randn(
         latent_image.size(), dtype=torch.float32, layout=latent_image.layout,
@@ -153,7 +142,7 @@ Denoiser = Callable[[Tensor, Tensor], Tensor]
 def sample_euler_ancestral_rf(model: Denoiser, x: Tensor, sigmas: Tensor, seed: int | None = None,
                               eta: float = 1.0, s_noise: float = 1.0, disable: bool = False,
                               callback=None) -> Tensor:
-    """comfy.k_diffusion.sampling.sample_euler_ancestral_RF."""
+    """Euler ancestral sampler for rectified-flow models."""
     noise_sampler = default_noise_sampler(x, seed=seed)
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
@@ -178,7 +167,7 @@ def sample_euler_ancestral_rf(model: Denoiser, x: Tensor, sigmas: Tensor, seed: 
 @torch.no_grad()
 def sample_euler(model: Denoiser, x: Tensor, sigmas: Tensor, seed: int | None = None,
                  disable: bool = False, callback=None, **kwargs) -> Tensor:
-    """comfy.k_diffusion.sampling.sample_euler (s_churn == 0 path)."""
+    """Deterministic Euler sampler."""
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
         sigma_hat = sigmas[i]
@@ -211,7 +200,7 @@ def sample(
     disable_pbar: bool = False,
     callback=None,
 ) -> Tensor:
-    """comfy.samplers.KSAMPLER.sample: scale the noise, run the sampler, unscale.
+    """Scale noise, execute the selected sampler, and unscale the result.
 
     ``denoise_fn(x, sigma)`` must return the *model output* (velocity); the CONST
     ``calculate_denoised`` conversion is applied here, exactly like
@@ -237,7 +226,7 @@ def sample(
 
 def slice_sigmas(sigmas: Tensor, start_step: int | None, last_step: int | None,
                  force_full_denoise: bool = False) -> Tensor:
-    """comfy.samplers.KSampler.sample start/last step handling (KSamplerAdvanced)."""
+    """Execute advanced sampling with optional start and final step bounds."""
     sigmas = sigmas.clone()
     if last_step is not None and last_step < (len(sigmas) - 1):
         sigmas = sigmas[: last_step + 1]

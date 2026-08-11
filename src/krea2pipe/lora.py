@@ -1,15 +1,13 @@
-"""LoRA merging.
+"""LoRA loading and in-place inference-weight merging.
 
-The workflow uses ``Power Lora Loader (rgthree)`` which simply forwards to ComfyUI's
-``LoraLoader`` -> ``comfy.sd.load_lora_for_models``.  The Krea 2 LoRAs ship diffusers
-style keys (``diffusion_model.<module>.lora_A/lora_B.weight``) and carry no ``alpha``
-tensor, so ComfyUI's ``LoRAAdapter.calculate_weight`` reduces to::
+Krea 2 LoRAs use diffusers-style keys
+(``diffusion_model.<module>.lora_A/lora_B.weight``). Without an ``alpha``
+tensor, the update is::
 
     W += strength * (B @ A)
 
-computed in float32 and cast back to the weight dtype (see
-``comfy/weight_adapter/lora.py``).  Because the model is only used for inference we
-merge the patch directly into the weights instead of cloning a ModelPatcher.
+The update is computed in float32 and cast back to the weight dtype. Because
+the model is inference-only, patches are merged directly into its weights.
 """
 
 from __future__ import annotations

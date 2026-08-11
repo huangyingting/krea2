@@ -1,10 +1,8 @@
 """Spatially tiled VAE encode / decode for the SeedVR2 causal video VAE.
 
-The official SeedVR repository always runs the VAE on the whole frame.  The
-``ComfyUI-SeedVR2_VideoUpscaler`` node adds spatial tiling, and ``krea2.json``
-enables it (``encode_tiled``/``decode_tiled`` with a 1024 px tile and a 128 px
-overlap).  Tiling is what keeps the 4096x4096 stage both fast and inside a
-sane VRAM budget, so we reproduce it here.
+The official SeedVR repository runs the VAE on the whole frame. Spatial tiling
+with a 1024 px tile and 128 px overlap keeps the 4096x4096 stage fast and within
+a practical VRAM budget.
 
 Tiles are blended with a separable raised-cosine ramp over the overlap region.
 Fades are only applied on *interior* tile edges so the outer image border keeps

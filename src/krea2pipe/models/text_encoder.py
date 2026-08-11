@@ -1,15 +1,13 @@
 """Krea 2 text conditioning: Qwen3-VL-4B with a 12-layer hidden-state tap.
 
-Reproduces ComfyUI's ``CLIPLoader(type="krea2")`` + ``CLIPTextEncode`` path:
-
 * prompt is wrapped in the Krea2 chat template (system + user, no ``<think>`` block),
 * hidden states ``[2, 5, 8, ..., 35]`` are stacked (12 layers),
 * the ``<|im_start|>system ... <|im_start|>user\\n`` prefix is stripped,
 * the stack is flattened to ``(B, seq, 12*2560)`` which is what the DiT consumes.
 
-The single-file ComfyUI checkpoint ``qwen3vl_4b_bf16.safetensors`` already uses HuggingFace
-key names (``model.language_model.*`` / ``model.visual.*``), so it is loaded straight into
-``transformers``' ``Qwen3VLModel``.
+The single-file checkpoint uses Hugging Face key names
+(``model.language_model.*`` / ``model.visual.*``), so it loads directly into
+``transformers.Qwen3VLModel``.
 """
 
 from __future__ import annotations
@@ -22,10 +20,8 @@ from transformers import Qwen2Tokenizer
 
 TOKENIZER_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qwen_tokenizer")
 
-# comfy/text_encoders/krea2.py :: KREA2_TAP_LAYERS
 KREA2_TAP_LAYERS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
 
-# comfy/text_encoders/krea2.py :: KREA2_TEMPLATE
 KREA2_TEMPLATE = (
     "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, "
     "quantity, text, spatial relationships of the objects and background:<|im_end|>\n"
@@ -140,7 +136,7 @@ class Krea2TextEncoder(torch.nn.Module):
 
     @staticmethod
     def _template_end(tokens: list[int]) -> int:
-        """comfy/text_encoders/krea2.py :: Krea2TEModel.encode_token_weights prefix strip."""
+        """Encode text and remove the fixed chat-template prefix."""
         template_end = -1
         count_im_start = 0
         for i, tok in enumerate(tokens):
@@ -178,5 +174,5 @@ class Krea2TextEncoder(torch.nn.Module):
 
 
 def conditioning_zero_out(cond: torch.Tensor) -> torch.Tensor:
-    """ComfyUI ``ConditioningZeroOut``: zeroes the conditioning tensor (keeps the shape)."""
+    """Zero a conditioning tensor while preserving its shape."""
     return torch.zeros_like(cond)

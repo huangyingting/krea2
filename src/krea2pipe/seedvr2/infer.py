@@ -42,9 +42,8 @@ from krea2pipe.seedvr2.dit import na
 def load_checkpoint_state(path: str, dtype=None, device="cpu"):
     """Load a ``.pth`` or ``.safetensors`` checkpoint.
 
-    The SeedVR2 weights redistributed for ComfyUI are safetensors (and may be
-    fp8 for some blocks), the research release ships ``.pth``; both are handled
-    here and cast to a single compute dtype.
+    Safetensors (including fp8 block variants) and research ``.pth`` checkpoints
+    are both accepted and cast to a single compute dtype.
     """
     if str(path).endswith(".safetensors"):
         from safetensors.torch import load_file
@@ -63,8 +62,7 @@ class VideoDiffusionInfer():
     def __init__(self, config: DictConfig):
         self.config = config
         #: ``((tile_h, tile_w), (overlap_h, overlap_w))`` for spatial VAE tiling
-        #: (added by ComfyUI-SeedVR2_VideoUpscaler); ``None`` keeps the official
-        #: whole-frame behaviour.
+        #: ``None`` keeps whole-frame behaviour.
         self.vae_tiling: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None
 
     def _tiling_kwargs(self) -> dict:
@@ -201,11 +199,7 @@ class VideoDiffusionInfer():
                 sample = sample.to(device)
                 if hasattr(self.vae, "preprocess"):
                     sample = self.vae.preprocess(sample)
-                # The encoder input arrives in float32.  ComfyUI's SeedVR2 node wraps
-                # the encode in ``autocast(dtype=input.dtype)``, and a float32 autocast
-                # target is a no-op cast, so the whole encoder runs in float32 against
-                # the bfloat16 weights.  Reproducing that keeps us bit-comparable with
-                # the reference graph -- and it is the more accurate of the two.
+                # Preserve float32 encoder inputs for the highest-accuracy VAE path.
                 vae_dtype = next(self.vae.parameters()).dtype
                 with torch.autocast(device.type, sample.dtype,
                                     enabled=vae_dtype != sample.dtype):

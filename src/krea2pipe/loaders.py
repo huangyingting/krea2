@@ -1,12 +1,12 @@
 """Model loading helpers.
 
-Loads the ComfyUI-format safetensors checkpoints straight off disk:
+Loads supported checkpoints directly from a configurable model directory:
 
-* ``models/diffusion_models/*.safetensors`` -> :class:`SingleStreamDiT`
+* ``diffusion_models/*.safetensors`` -> :class:`SingleStreamDiT`
   (keys are prefixed with ``model.diffusion_model.``)
-* ``models/vae/qwen_image_vae.safetensors`` -> :class:`WanVAE`
-* ``models/text_encoders/qwen3vl_4b_bf16.safetensors`` -> :class:`Krea2TextEncoder`
-* ``models/upscale_models/*.pth`` -> a spandrel image-to-image model
+* ``vae/qwen_image_vae.safetensors`` -> :class:`WanVAE`
+* ``text_encoders/qwen3vl_4b_bf16.safetensors`` -> :class:`Krea2TextEncoder`
+* ``upscale_models/*.pth`` -> a spandrel image-to-image model
 """
 
 from __future__ import annotations
@@ -23,39 +23,45 @@ from .models.vae import WanVAE
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COMFY_ROOT = os.environ.get("COMFYUI_ROOT", "/data/ComfyUI")
+DEFAULT_MODEL_ROOT = os.environ.get("KREA2_MODEL_ROOT", "/data/models")
 
 
-def comfy_path(*parts: str) -> str:
-    return os.path.join(DEFAULT_COMFY_ROOT, *parts)
+def normalize_model_root(model_root: str) -> str:
+    if not isinstance(model_root, str) or not model_root:
+        raise ValueError("model-root must be a non-empty absolute path")
+    root = os.path.expanduser(model_root)
+    if not os.path.isabs(root):
+        raise ValueError("model-root must be an absolute path")
+    return os.path.normpath(root)
 
 
-def resolve_model(kind: str, name: str) -> str:
-    """Resolve ``name`` inside ``<comfy>/models/<kind>`` unless it is already a path."""
-    if os.path.isabs(name) or os.path.exists(name):
+def resolve_model(kind: str, name: str, model_root: str = DEFAULT_MODEL_ROOT) -> str:
+    """Resolve absolute paths directly and relative names below ``model_root/kind``."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("model name must be a non-empty path")
+    name = os.path.expanduser(name)
+    if os.path.isabs(name):
         return name
-    return comfy_path("models", kind, name)
+    return os.path.join(normalize_model_root(model_root), kind, name)
 
 
-def resolve_prompt_file(name: str) -> str:
-    """Resolve a prompt text file.
-
-    ``Text Load Line From File`` stores paths relative to the ComfyUI root (the
-    workflow uses ``t2i/prompts/...``), so try that first and fall back to the
-    ``input`` directory before giving up.
-    """
-    if os.path.isabs(name) or os.path.exists(name):
-        return name
-    for candidate in (comfy_path(name), comfy_path("input", name)):
-        if os.path.exists(candidate):
-            return candidate
-    raise FileNotFoundError(
-        f"prompt file {name!r} not found under {DEFAULT_COMFY_ROOT} "
-        "(set COMFYUI_ROOT or pass an absolute path)"
-    )
+def require_model(kind: str, name: str, model_root: str = DEFAULT_MODEL_ROOT,
+                  label: str = "model") -> str:
+    """Resolve a model and fail with configuration context when it is unavailable."""
+    path = resolve_model(kind, name, model_root)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"{label} not found: {path} (configured as {name!r}; "
+            f"model-root={normalize_model_root(model_root)!r})"
+        )
+    if not os.access(path, os.R_OK):
+        raise PermissionError(f"{label} is not readable: {path}")
+    return path
 
 
 def load_state_dict(path: str, prefix: str | None = None) -> dict[str, torch.Tensor]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"checkpoint not found: {path}")
     sd = load_file(path, device="cpu")
     if prefix:
         sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
@@ -79,8 +85,9 @@ def _load_into(model: torch.nn.Module, sd: dict[str, torch.Tensor], dtype: torch
     return model
 
 
-def load_dit(name: str, device="cuda", dtype=torch.bfloat16) -> SingleStreamDiT:
-    path = resolve_model("diffusion_models", name)
+def load_dit(name: str, device="cuda", dtype=torch.bfloat16,
+             model_root: str = DEFAULT_MODEL_ROOT) -> SingleStreamDiT:
+    path = require_model("diffusion_models", name, model_root, "Krea 2 checkpoint")
     logger.info("loading diffusion model %s", path)
     sd = load_state_dict(path, prefix="model.diffusion_model.")
     config = Krea2Config.from_state_dict(sd)
@@ -90,8 +97,9 @@ def load_dit(name: str, device="cuda", dtype=torch.bfloat16) -> SingleStreamDiT:
     return _load_into(model, sd, dtype, device)
 
 
-def load_vae(name: str = "qwen_image_vae.safetensors", device="cuda", dtype=torch.bfloat16) -> WanVAE:
-    path = resolve_model("vae", name)
+def load_vae(name: str = "qwen_image_vae.safetensors", device="cuda",
+             dtype=torch.bfloat16, model_root: str = DEFAULT_MODEL_ROOT) -> WanVAE:
+    path = require_model("vae", name, model_root, "image VAE")
     logger.info("loading vae %s", path)
     sd = load_state_dict(path)
     dim = sd["decoder.head.0.gamma"].shape[0]
@@ -105,19 +113,20 @@ def load_vae(name: str = "qwen_image_vae.safetensors", device="cuda", dtype=torc
 
 
 def load_text_encoder(name: str = "qwen3vl_4b_bf16.safetensors", device="cuda",
-                      dtype=torch.bfloat16):
+                      dtype=torch.bfloat16, model_root: str = DEFAULT_MODEL_ROOT):
     from .models.text_encoder import Krea2TextEncoder
 
-    path = resolve_model("text_encoders", name)
+    path = require_model("text_encoders", name, model_root, "text encoder")
     logger.info("loading text encoder %s", path)
     return Krea2TextEncoder(path, device=device, dtype=dtype)
 
 
-def load_upscale_model(name: str, device="cuda"):
-    """``UpscaleModelLoader`` - spandrel, same as comfy_extras/nodes_upscale_model.py."""
+def load_upscale_model(name: str, device="cuda",
+                       model_root: str = DEFAULT_MODEL_ROOT):
+    """Load a spandrel-compatible image upscaler."""
     import spandrel
 
-    path = resolve_model("upscale_models", name)
+    path = require_model("upscale_models", name, model_root, "upscale model")
     logger.info("loading upscale model %s", path)
     sd = torch.load(path, map_location="cpu", weights_only=True)
     if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:

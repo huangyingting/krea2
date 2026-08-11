@@ -1,7 +1,7 @@
 [project]
 name = "krea2pipe"
 version = "0.1.0"
-description = "Pure-python implementation of the Moody Krea2 4KHD ComfyUI workflow (krea2.json)"
+description = "Standalone Krea 2 image-generation and 4K upscaling pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

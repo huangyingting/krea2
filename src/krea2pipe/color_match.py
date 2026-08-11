@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from torch import Tensor
-
-logger = logging.getLogger(__name__)
 
 METHODS = ("default", "hm", "reinhard", "mvgd", "mkl", "hm-mvgd-hm", "hm-mkl-hm")
 
@@ -35,14 +32,10 @@ def color_match(image_ref: Tensor, image_target: Tensor, method: str = "mkl",
         cm = ColorMatcher()
         target_np = images_target_np if batch_size == 1 else images_target[i].numpy()
         ref_np = image_ref_np if image_ref.size(0) == 1 else images_ref[i].numpy()
-        try:
-            result = cm.transfer(src=target_np, ref=ref_np, method=method)
-            if strength != 1:
-                result = target_np + strength * (result - target_np)
-            return torch.from_numpy(result)
-        except Exception as exc:  # pragma: no cover - matches the node's behaviour
-            logger.warning("color match failed (%s), passing target through", exc)
-            return torch.from_numpy(target_np)
+        result = cm.transfer(src=target_np, ref=ref_np, method=method)
+        if strength != 1:
+            result = target_np + strength * (result - target_np)
+        return torch.from_numpy(result)
 
     if batch_size == 1:
         out = [match_one(0)]

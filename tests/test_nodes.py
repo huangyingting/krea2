@@ -1,4 +1,4 @@
-"""Unit tests for the ported ComfyUI nodes (``krea2pipe.nodes``)."""
+"""Unit tests for standalone workflow operations."""
 
 from __future__ import annotations
 
@@ -158,6 +158,17 @@ def test_color_match_batch_matches_independent_images():
     assert torch.equal(batched, independent)
 
 
+def test_color_match_does_not_hide_transfer_failures(monkeypatch):
+    from color_matcher import ColorMatcher
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("transfer failed")
+
+    monkeypatch.setattr(ColorMatcher, "transfer", fail)
+    with pytest.raises(RuntimeError, match="transfer failed"):
+        color_match.color_match(_img(0.8), _img(0.2), "mkl")
+
+
 @pytest.mark.parametrize("method", color_match.METHODS)
 def test_color_match_supports_all_documented_methods(method):
     torch.manual_seed(2)
@@ -192,6 +203,22 @@ def test_save_image_jpeg_with_metadata(tmp_path):
         assert img.size == (64, 64)
         # piexif stores the A1111 parameter string as a UTF-16 UserComment
         assert "a prompt".encode("utf-16-be") in img.info.get("exif", b"")
+
+
+def test_save_image_is_atomic_and_leaves_no_temporary_file(tmp_path):
+    (path,) = nodes.save_image(
+        torch.rand(1, 8, 8, 3), str(tmp_path), "atomic", extension="png"
+    )
+    assert path.endswith("atomic.png")
+    assert [item.name for item in tmp_path.iterdir()] == ["atomic.png"]
+
+
+def test_save_image_rejects_a_subdirectory_outside_output_root(tmp_path):
+    with pytest.raises(ValueError, match="escapes output-dir"):
+        nodes.save_image(
+            torch.rand(1, 8, 8, 3), str(tmp_path), "escape",
+            subdir="../outside", extension="png",
+        )
 
 
 def test_a1111_metadata_format():

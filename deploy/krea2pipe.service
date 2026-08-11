@@ -2,21 +2,23 @@
 Description=Krea2 prompt queue renderer
 After=local-fs.target
 ConditionPathExists=/home/azadmin/krea2/krea2pipe.toml
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=azadmin
 WorkingDirectory=/home/azadmin/krea2
-Environment=COMFYUI_ROOT=/data/ComfyUI
 Environment=PYTHONUNBUFFERED=1
 # Cache compiled CUDA kernels across service and machine restarts.
 Environment=TORCHINDUCTOR_CACHE_DIR=/var/cache/krea2pipe/inductor
 CacheDirectory=krea2pipe
 ExecStart=/home/azadmin/krea2/.venv/bin/krea2pipe --config /home/azadmin/krea2/krea2pipe.toml
 Restart=on-failure
-RestartSec=10
+RestartSec=30
 KillSignal=SIGINT
 TimeoutStopSec=30
+SuccessExitStatus=130 SIGINT
 
 [Install]
 WantedBy=multi-user.target

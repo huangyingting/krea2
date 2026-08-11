@@ -1,8 +1,4 @@
-"""Pure-python ports of the individual ComfyUI nodes used by ``krea2.json``.
-
-Every function mirrors the maths of the node it replaces; see the module docstrings /
-inline references for the exact source file in the ComfyUI installation.
-"""
+"""Small standalone workflow operations."""
 
 from __future__ import annotations
 
@@ -11,7 +7,9 @@ import logging
 import math
 import operator as op
 import os
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
 import torch
 from torch import Tensor
@@ -23,7 +21,7 @@ from .imageutil import tensor_to_pil
 logger = logging.getLogger(__name__)
 
 
-# --- ResolutionSelector (comfy_extras/nodes_resolution.py) ---------------------------
+# --- Resolution selection ------------------------------------------------------------
 
 ASPECT_RATIOS = {
     "1:1 (Square)": (1, 1),
@@ -55,7 +53,7 @@ def resolution_selector(aspect_ratio: str, megapixels: float, multiple: int) -> 
     return width, height
 
 
-# --- SimpleMath+ (ComfyUI_essentials/misc.py) ---------------------------------------
+# --- Safe arithmetic -----------------------------------------------------------------
 
 _MATH_OPERATORS = {
     ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv,
@@ -68,7 +66,7 @@ _MATH_FUNCS = {"min": min, "max": max, "round": round, "sum": sum, "len": len}
 
 
 def simple_math(value: str, a=0.0, b=0.0, c=0.0, d=0.0) -> tuple[int, float]:
-    """``SimpleMath+`` -> (INT, FLOAT).  Restricted AST evaluator, verbatim port."""
+    """Evaluate restricted arithmetic and return integer and floating results."""
 
     def eval_(node):
         if isinstance(node, ast.Constant):
@@ -112,7 +110,7 @@ def text_load_line_from_file(file_path: str, index: int, mode: str = "index") ->
     if not lines:
         return ""
     if mode != "index":
-        raise ValueError("only mode='index' is ported (the workflow uses it)")
+        raise ValueError("only mode='index' is supported")
     if index >= len(lines):
         index = index % len(lines)
     if index < 0:
@@ -120,7 +118,7 @@ def text_load_line_from_file(file_path: str, index: int, mode: str = "index") ->
     return lines[index]
 
 
-# --- Image Saver (ComfyUI-Image-Saver) ------------------------------------------------
+# --- Image saving ---------------------------------------------------------------------
 
 def _sanitize(name: str) -> str:
     return "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
@@ -137,7 +135,7 @@ def save_image(
     metadata: str | None = None,
     counter: int = 0,
 ) -> list[str]:
-    """Simplified ``Image Saver``: token substitution, batch suffixes, EXIF metadata."""
+    """Save a BHWC image batch with token substitution and metadata."""
     name = filename
     name = name.replace("%date", datetime.now().strftime("%Y-%m-%d"))
     name = name.replace("%time", datetime.now().strftime(time_format))
@@ -147,38 +145,62 @@ def save_image(
     directory, basename = os.path.split(name)
     basename = _sanitize(basename) or "image"
 
-    target_dir = os.path.join(output_dir, subdir, directory)
-    os.makedirs(target_dir, exist_ok=True)
+    output_root = Path(output_dir).expanduser().resolve()
+    target_dir = (output_root / subdir / directory).resolve()
+    try:
+        target_dir.relative_to(output_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"output subdirectory escapes output-dir: {target_dir}"
+        ) from exc
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     paths = []
     batch = image.shape[0]
     for i in range(batch):
         suffix = "" if batch == 1 else f"_{i:02d}"
-        path = os.path.join(target_dir, f"{basename}{suffix}.{extension}")
+        path = str(target_dir / f"{basename}{suffix}.{extension}")
         n = 1
         while os.path.exists(path):
-            path = os.path.join(target_dir, f"{basename}{suffix}_{n:02d}.{extension}")
+            path = str(target_dir / f"{basename}{suffix}_{n:02d}.{extension}")
             n += 1
         img = tensor_to_pil(image, i)
-        if extension == "png":
-            from PIL.PngImagePlugin import PngInfo
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{basename}-", suffix=f".{extension}", dir=target_dir
+        )
+        os.close(fd)
+        try:
+            if extension == "png":
+                from PIL.PngImagePlugin import PngInfo
 
-            info = PngInfo()
-            if metadata:
-                info.add_text("parameters", metadata)
-            img.save(path, pnginfo=info, optimize=True)
-        else:
-            img.save(path, optimize=True, quality=quality)
-            if metadata:
-                try:
+                info = PngInfo()
+                if metadata:
+                    info.add_text("parameters", metadata)
+                img.save(temporary, format="PNG", pnginfo=info, optimize=True)
+            else:
+                image_format = "JPEG" if extension in {"jpg", "jpeg"} else extension.upper()
+                img.save(temporary, format=image_format, optimize=True, quality=quality)
+                if metadata:
                     import piexif
                     import piexif.helper
 
                     exif = {"Exif": {piexif.ExifIFD.UserComment:
                                      piexif.helper.UserComment.dump(metadata, encoding="unicode")}}
-                    piexif.insert(piexif.dump(exif), path)
-                except Exception as exc:  # pragma: no cover
-                    logger.warning("could not write EXIF metadata: %s", exc)
+                    piexif.insert(piexif.dump(exif), temporary)
+            with open(temporary, "rb") as fh:
+                os.fsync(fh.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(target_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
         paths.append(path)
         logger.info("saved %s", path)
     return paths
@@ -186,7 +208,7 @@ def save_image(
 
 def a1111_metadata(positive: str, negative: str, steps: int, sampler: str, cfg: float,
                    seed: int, width: int, height: int, model_name: str = "") -> str:
-    """The A1111-style ``parameters`` string produced by ComfyUI-Image-Saver."""
+    """Build an A1111-compatible image metadata string."""
     return (
         f"{positive}\n"
         f"Negative prompt: {negative}\n"

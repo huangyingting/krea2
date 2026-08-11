@@ -1,10 +1,8 @@
 """Krea 2 (K2) single-stream MMDiT.
 
-Pure-python port of the Krea 2 diffusion transformer.  The architecture follows the
-official reference implementation (https://github.com/krea-ai/krea-2, ``mmdit.py``) and
-the semantics of ComfyUI's ``comfy/ldm/krea2/model.py`` (which is what the original
-workflow executed): no attention mask, no sequence padding, 3-axis RoPE and a
-12-layer Qwen3-VL text fusion adapter.
+The architecture follows the official implementation
+(https://github.com/krea-ai/krea-2, ``mmdit.py``): no attention mask, no
+sequence padding, 3-axis RoPE, and a 12-layer Qwen3-VL text-fusion adapter.
 
 Checkpoint layout (``model.diffusion_model.*`` keys of e.g.
 ``moodyKrea2Mix_v50BF16.safetensors``) is loaded verbatim - the module names here match
@@ -42,7 +40,7 @@ class Krea2Config:
 
     @classmethod
     def from_state_dict(cls, sd: dict[str, Tensor]) -> "Krea2Config":
-        """Mirror of comfy/model_detection.py's krea2 branch."""
+        """Infer architecture dimensions from checkpoint tensors."""
         head_dim = 128
         first_w = sd["first.weight"]
         patch = 2

@@ -1,10 +1,8 @@
 """SeedVR2 one-step diffusion upscaler - single image / short clip runner.
 
 This mirrors ``projects/inference_seedvr2_7b.py`` from the official SeedVR
-repository (``generation_step`` + ``generation_loop``), reduced to the
-single-process, single-batch case that the ``krea2.json`` workflow needs and
-extended with the ``resolution`` / ``max_resolution`` / ``color_correction``
-semantics of the ``SeedVR2VideoUpscaler`` ComfyUI node.
+repository (``generation_step`` + ``generation_loop``), reduced to
+single-process inference and extended with resolution limits and color correction.
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ EMBED_FILES = ("pos_emb.pt", "neg_emb.pt")
 
 @dataclass
 class SeedVR2Config:
-    """Widget values of the SeedVR2 nodes in ``krea2.json``."""
+    """SeedVR2 inference and output settings."""
 
     dit_model: str = "seedvr2_ema_7b_fp16.safetensors"
     vae_model: str = "ema_vae_fp16.safetensors"
@@ -64,7 +62,7 @@ class SeedVR2Config:
     #: extra VRAM but avoids two model transfers)
     keep_dit_resident: bool = True
 
-    #: spatially tiled VAE encode / decode, as ``krea2.json`` configures it.
+    #: Spatially tiled VAE encode/decode settings.
     #: Tiling is always the fast path at 4K (~10 s and ~35 GB cheaper than the
     #: official whole-frame VAE); it is skipped automatically when the image
     #: already fits in a single tile.
@@ -76,27 +74,29 @@ class SeedVR2Config:
 
 
 def default_model_dir() -> str:
-    from ..loaders import comfy_path
+    from ..loaders import DEFAULT_MODEL_ROOT
 
-    return comfy_path("models", "SEEDVR2")
+    return os.path.join(DEFAULT_MODEL_ROOT, "SEEDVR2")
 
 
 def _resolve(name: str, model_dir: str) -> str:
-    if os.path.isabs(name) or os.path.exists(name):
-        return name
-    path = os.path.join(model_dir, name)
+    name = os.path.expanduser(name)
+    path = name if os.path.isabs(name) else os.path.join(model_dir, name)
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"missing SeedVR2 weight {name!r} in {model_dir!r}. Download it from "
+            f"missing SeedVR2 weight at {path!r}. Download it from "
             "https://huggingface.co/ByteDance-Seed/SeedVR2-7B"
         )
     return path
 
 
-def _find_embeds(cfg: SeedVR2Config) -> tuple[Path, Path]:
+def resolve_embeddings(cfg: SeedVR2Config) -> tuple[Path, Path]:
     candidates = []
     if cfg.embeds_dir:
-        candidates.append(Path(cfg.embeds_dir))
+        embeds_dir = Path(cfg.embeds_dir).expanduser()
+        if not embeds_dir.is_absolute() and cfg.model_dir:
+            embeds_dir = Path(cfg.model_dir) / embeds_dir
+        candidates.append(embeds_dir)
     candidates.append(Path(__file__).parent / "embeddings")
     if cfg.model_dir:
         candidates.append(Path(cfg.model_dir))
@@ -156,7 +156,7 @@ class SeedVR2Upscaler:
 
     # --- inference ---------------------------------------------------------
     def _text_embeds(self) -> dict[str, list[Tensor]]:
-        pos_path, neg_path = _find_embeds(self.cfg)
+        pos_path, neg_path = resolve_embeddings(self.cfg)
         device = get_device()
         dtype = getattr(torch, self.cfg.dtype)
         pos = torch.load(pos_path, weights_only=True, map_location="cpu").to(device, dtype)
@@ -182,7 +182,7 @@ class SeedVR2Upscaler:
         aug_noises = []
         for latent in cond_latents:
             if independent:
-                # The ComfyUI node resets its seed for every batch_size=1 job.
+                # Independent images deliberately reset to the configured seed.
                 set_seed(self.cfg.seed, same_across_ranks=True)
             noises.append(torch.randn_like(latent))
             aug_noises.append(torch.randn_like(latent))
@@ -322,9 +322,8 @@ def release_upscaler() -> None:
 def seedvr2_upscale(image: Tensor, cfg: SeedVR2Config | None = None, **overrides) -> Tensor:
     """Upscale an IMAGE batch, reusing the models loaded by a previous call.
 
-    The workflow's SeedVR2 node has ``batch_size=1``: ComfyUI splits its input
-    IMAGE batch into independent one-frame jobs.  Keep that distinction here;
-    ``SeedVR2Upscaler.upscale`` itself remains the lower-level video API.
+    Images are split into independent one-frame jobs;
+    ``SeedVR2Upscaler.upscale`` remains the lower-level video API.
     """
     cfg = cfg or SeedVR2Config()
     if overrides:

@@ -37,6 +37,7 @@ _PLACEHOLDERS: dict[str, Any] = {
     "prompt": "A description of the image to generate",
     "width": 1248,
     "height": 1248,
+    "log_file": "/data/krea2/logs/krea2pipe.log",
 }
 _TEMPLATE_DEFAULTS: dict[str, Any] = {
     "loras": [
@@ -107,9 +108,9 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "#   3. Set `watch` above zero for a continuously running service.",
         "#   4. Run: krea2pipe --config krea2pipe.toml",
         "#",
-        "# Command-line options override this file. Model names are resolved from",
-        "# $COMFYUI_ROOT/models (default: /data/ComfyUI/models). Keep this file flat:",
-        "# use the keys shown below rather than adding TOML [section] tables.",
+        "# Command-line options override this file. Relative checkpoint names are",
+        "# resolved below the absolute `model-root`; absolute checkpoints also work.",
+        "# Keep this file flat: use these keys rather than TOML [section] tables.",
     ]
     seen: set[str] = set()
     for group in parser._action_groups:
