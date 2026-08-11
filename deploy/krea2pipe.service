@@ -1,6 +1,8 @@
 [Unit]
 Description=Krea2 renderer and local image API
 After=local-fs.target
+RequiresMountsFor=/data/krea2 /data/ComfyUI/models
+OnFailure=krea2pipe-retry.service
 ConditionPathExists=/data/krea2/krea2pipe.toml
 StartLimitIntervalSec=300
 StartLimitBurst=3

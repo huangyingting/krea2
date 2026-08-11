@@ -136,7 +136,7 @@ difference, which is why the base image sits at ~4/255 while a single step is at
 
 ```bash
 uv run pytest                       # CPU + real-model GPU tests
-uv run pytest -m gpu                # just the 13 end-to-end GPU tests, ~60 s
+uv run pytest -m gpu                # just the 16 opt-in GPU tests
 KREA2_PARITY=1 uv run pytest -m gpu # include development reference checks
 ```
 
@@ -248,7 +248,7 @@ kernel path as modern PyTorch SDPA on this A100.
 
 ## Batch queue and service
 
-The public CLI has three actions:
+The public CLI has four invocation forms:
 
 | Command | Behavior |
 | --- | --- |
@@ -339,8 +339,7 @@ prompt-count = 0
 
 `prompt-count` is optional. Omitting it or setting it to zero runs continuously
 until interrupted; a positive value makes the theme run finite. All source
-settings are ignored in this mode. Qwen remains on the GPU
-across generation,
+settings are ignored in this mode. Qwen remains on the GPU across generation,
 using Krea 2's official
 [`docs/expansion.txt`](https://github.com/krea-ai/krea-2/blob/db3984fbc6e13b34c0064990fc2d95ac64d00058/docs/expansion.txt)
 as its default system prompt. Override `theme-system-prompt` with a TOML
@@ -364,10 +363,11 @@ sequence; increasing a finite `prompt-count` continues it. The expanded prompt,
 original theme, index, prompt seed, and expansion-system source are also stored
 inside every image's reproducibility manifest.
 
-After an image is saved, its prompt key is committed transactionally to the
-SQLite queue. If the process or machine stops mid-image, that prompt remains
-pending and is safely retried. To consume the selected source or theme again,
-clear only its completion state:
+Completion advances only after every output image is durably saved. Source mode
+then commits the prompt ID transactionally to SQLite; theme mode atomically
+advances its JSON progress file. If the process or machine stops mid-image, the
+active prompt remains pending and is safely retried. To consume the selected
+source or theme again, clear only its completion state:
 
 ```bash
 uv run krea2pipe --config krea2pipe.toml --reset-status
@@ -388,7 +388,26 @@ root, and enables the systemd service. Prompt files placed under
 `/data/krea2/prompts` are consumed recursively and images are written under
 `/data/krea2/output`. Existing configuration and outputs are preserved when the
 installer is rerun. Pass `--no-start` to install or update the service without
-starting it.
+starting it. The deployment script targets a Debian/Ubuntu systemd host; the
+`azadmin` account and `/data/ComfyUI/models` must already exist.
+
+The unit explicitly waits for the filesystems containing `/data/krea2` and
+`/data/ComfyUI/models`. This includes the `/data` mount when both directories
+live there. If a required mount or its RAID device misses systemd's initial
+boot-time window, `krea2pipe-retry.service` retries the service start every 30
+seconds; each attempt also retries the required mount. A manual
+`systemctl stop krea2pipe` also stops any pending retry.
+
+For a RAID-backed `/data`, define the array and filesystem persistently in
+`mdadm.conf` and `/etc/fstab`; do not rely on a one-time manual mount. `nofail`
+may be retained so an unavailable data disk does not block the whole machine.
+Verify the dependency and boot result with:
+
+```bash
+systemctl show krea2pipe -p RequiresMountsFor -p After
+systemctl status data.mount krea2pipe
+journalctl -b -u data.mount -u krea2pipe
+```
 
 The installer does not require uv to be installed beforehand. It first reuses,
 in order, an explicit `UV_BIN`, `/data/krea2/bin/uv`, uv from root's `PATH`, or
@@ -530,8 +549,8 @@ blend-factor = 0.4
 Supported aspect ratios are `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `9:16`,
 `16:9`, and `21:9`. A random seed is chosen when the service starts; prompt
 lines still receive durable source/content identities during that process, and
-the resolved seed is written to image metadata. LoRAs are merged in listed order and may each
-use a different strength. `dtype` controls model compute precision and VRAM;
+the resolved seed is written to image metadata. LoRAs are merged in listed
+order and may each use a different strength. `dtype` controls model compute precision and VRAM;
 `bfloat16` is recommended for the target A100, while `float16` is available
 for hardware compatibility and `float32` mainly for debugging.
 
@@ -581,8 +600,8 @@ existing file contents.
 Before loading weights, the application validates numeric settings, CUDA
 availability, every checkpoint needed by enabled stages, and output-directory
 access. Saved images are written to a temporary file, fsynced, and atomically
-renamed. An exclusive output-directory lock prevents a service and a manual run
-from writing the same resume ledger concurrently.
+renamed. An exclusive lock under `state-dir` prevents the service and a manual
+run from mutating the same queue/progress state concurrently.
 
 Each stage logs elapsed time and peak allocated CUDA memory. A CUDA allocation
 failure identifies the failed stage, current batch and base resolution, and

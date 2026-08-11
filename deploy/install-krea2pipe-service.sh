@@ -6,6 +6,7 @@ MODEL_ROOT="/data/ComfyUI/models"
 SERVICE_NAME="krea2pipe"
 SERVICE_USER="azadmin"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+RETRY_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}-retry.service"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 START_SERVICE=1
@@ -142,6 +143,9 @@ runuser -u "${SERVICE_USER}" -- "${APP_HOME}/bin/uv" --version
 if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
     systemctl stop "${SERVICE_NAME}.service"
 fi
+if systemctl is-active --quiet "${SERVICE_NAME}-retry.service"; then
+    systemctl stop "${SERVICE_NAME}-retry.service"
+fi
 
 install -m 0644 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
     "${SOURCE_ROOT}/README.md" \
@@ -212,6 +216,8 @@ runuser -u "${SERVICE_USER}" -- env \
         --no-dev
 
 install -m 0644 "${SOURCE_ROOT}/deploy/krea2pipe.service" "${UNIT_PATH}"
+install -m 0644 \
+    "${SOURCE_ROOT}/deploy/krea2pipe-retry.service" "${RETRY_UNIT_PATH}"
 systemctl daemon-reload
 
 if [[ "${START_SERVICE}" -eq 1 ]]; then

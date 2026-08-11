@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry Krea2 after a startup failure
+PartOf=krea2pipe.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start krea2pipe.service
+Restart=on-failure
+RestartSec=30

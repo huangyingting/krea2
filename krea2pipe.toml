@@ -8,7 +8,7 @@
 #
 # Only settings for the selected mode are used; the other mode is ignored.
 # For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.
-# Source mode uses filesystem events; theme mode runs continuously.
+# Source mode uses filesystem events; theme mode is continuous by default.
 # A full source reconciliation runs every 300 seconds as a safety net.
 #
 # Path resolution:
@@ -20,6 +20,8 @@
 # Operational state:
 #   - Source queue: STATE_DIR/.krea2pipe-source.sqlite3.
 #   - Theme progress: STATE_DIR/.krea2pipe-theme-progress.json.
+#   - Process lock: STATE_DIR/.krea2pipe.lock.
+#   - Thumbnail cache: STATE_DIR/thumbnails/.
 #   - WAL NORMAL avoids per-image fsync; abrupt power loss may replay work.
 #
 # Keep this file flat: use these keys rather than TOML [section] tables.
@@ -99,7 +101,7 @@ batch-size = 1
 
 # --- Sampling ---
 # Random seeds are resolved once per process and embedded in every output image.
-# File prompts receive stable path/line/content offsets; theme seeds resume from the
+# File prompts receive durable source/content identities; theme seeds resume from the
 # atomic theme progress file.
 #
 # Integer seed or 'random' (chosen once at startup)
@@ -220,8 +222,8 @@ save = true
 # count.
 # Thumbnail cache files live under state-dir/thumbnails and never pollute output-dir.
 #
-# Run the loopback monitoring and generated-image management API alongside source or
-# theme processing; CLI --prompt and --reset-status do not start it
+# Run the loopback monitoring and generated-image management API alongside persistent
+# source or theme processing; CLI --prompt and --reset-status do not start it
 service-mode = true
 # Numeric loopback IP address for the HTTP API, normally 127.0.0.1; hostnames and non-
 # loopback bindings are rejected

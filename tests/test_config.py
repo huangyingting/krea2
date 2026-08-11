@@ -808,6 +808,23 @@ def test_canonical_config_exposes_every_optional_stage():
     assert cfg.color_match_method == "hm-mkl-hm"
     assert cfg.blend_upscale_model_name == "4xNomosWebPhoto_RealPLKSR.pth"
     assert cfg.state_dir == "state"
+    assert cfg.service_mode
+    assert cfg.api_host == "127.0.0.1"
+    assert cfg.api_port == 8787
+
+
+def test_documentation_uses_current_queue_and_service_terms():
+    root = Path(__file__).parents[1]
+    readme = (root / "README.md").read_text()
+    canonical = (root / "krea2pipe.toml").read_text()
+
+    assert "four invocation forms" in readme
+    assert "16 opt-in GPU tests" in readme
+    assert "exclusive lock under `state-dir`" in readme
+    assert "commits the prompt ID transactionally to SQLite" in readme
+    assert "stable path/line/content offsets" not in canonical
+    assert "Process lock: STATE_DIR/.krea2pipe.lock." in canonical
+    assert "Thumbnail cache: STATE_DIR/thumbnails/." in canonical
 
 
 def test_config_rejects_relative_model_root(tmp_path):

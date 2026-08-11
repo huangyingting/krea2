@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy" / "install-krea2pipe-service.sh"
 UNIT = ROOT / "deploy" / "krea2pipe.service"
+RETRY_UNIT = ROOT / "deploy" / "krea2pipe-retry.service"
 
 
 def test_service_installer_has_valid_bash_syntax():
@@ -46,6 +47,7 @@ def test_service_installer_provisions_requested_paths():
     assert "reconcile-interval = 300" in script
     assert '"${APP_HOME}/bin/uv" sync' in script
     assert 'sources = ["/data/krea2/prompts/**/*.txt"]' in script
+    assert '"${SOURCE_ROOT}/deploy/krea2pipe-retry.service"' in script
     assert "systemctl enable --now" in script
 
 
@@ -58,3 +60,15 @@ def test_systemd_unit_uses_dedicated_home_and_model_library():
     assert "ExecStart=/data/krea2/.venv/bin/krea2pipe" in unit
     assert "ReadOnlyPaths=/data/ComfyUI/models" in unit
     assert "ReadWritePaths=/data/krea2" in unit
+    assert "RequiresMountsFor=/data/krea2 /data/ComfyUI/models" in unit
+    assert "OnFailure=krea2pipe-retry.service" in unit
+
+
+def test_systemd_retry_covers_failures_before_service_process_start():
+    unit = RETRY_UNIT.read_text()
+
+    assert "PartOf=krea2pipe.service" in unit
+    assert "StartLimitIntervalSec=0" in unit
+    assert "ExecStart=/usr/bin/systemctl start krea2pipe.service" in unit
+    assert "Restart=on-failure" in unit
+    assert "RestartSec=30" in unit
