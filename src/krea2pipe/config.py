@@ -34,6 +34,8 @@ _TEMPLATE_HIDE = {"lora_name", "lora_strength"}
 _PLACEHOLDERS: dict[str, Any] = {
     "source": "/data/krea2/prompts",
     "theme": "A visual theme for Qwen to expand into varied prompts",
+    "prompt_count": 0,
+    "watch": 10,
     "width": 1248,
     "height": 1248,
     "log_file": "/data/krea2/logs/krea2pipe.log",
@@ -97,18 +99,18 @@ def _toml_value(value: Any) -> str:
 
 
 def render_config_template(parser: argparse.ArgumentParser) -> str:
-    """Return a documented flat TOML file containing every CLI default."""
+    """Return a documented flat TOML file containing every TOML default."""
     lines = [
         "# krea2pipe configuration",
         "#",
         "# Quick start:",
-        "#   1. Uncomment `source` and point it at a prompt file or directory.",
+        "#   1. Uncomment exactly one input mode: `source` or `theme`.",
         "#   2. Set `output-dir` to a persistent directory.",
-        "#   3. Set `watch` above zero for a continuously running service.",
-        "#   4. Run: krea2pipe --config krea2pipe.toml",
+        "#   3. Run: krea2pipe --config krea2pipe.toml",
         "#",
         "# Use exactly one input mode: `source` or `theme`. For a one-time prompt,",
         "# pass `--prompt` on the CLI; all other settings still come from this file.",
+        "# Source mode polls every 10 seconds by default; theme mode runs continuously.",
         "# Relative checkpoint names are",
         "# resolved below the absolute `model-root`; absolute checkpoints also work.",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",

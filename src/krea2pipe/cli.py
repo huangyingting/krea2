@@ -31,6 +31,8 @@ from .workflow import (
 DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 MAX_SEED = (1 << 64) - 1
 MAX_SEEDVR2 = (1 << 32) - 1
+DEFAULT_SOURCE_WATCH = 10.0
+DEFAULT_THEME_PROMPT_COUNT = 0
 logger = logging.getLogger(__name__)
 
 
@@ -138,15 +140,15 @@ def build_config_parser() -> argparse.ArgumentParser:
 
     g = p.add_argument_group("input mode")
     g.add_argument("--source", default=None, metavar="FILE_OR_DIR",
-                   help="prompt file or folder; one image is rendered per non-empty line "
-                        "and completed lines are skipped on restart")
+                   help="SOURCE MODE: prompt file or folder; one image is rendered per "
+                        "non-empty line and completed lines are skipped on restart")
+    g.add_argument("--watch", type=float, default=None, metavar="SECONDS",
+                   help="SOURCE MODE ONLY: polling interval; omitted uses 10 seconds, "
+                        "while 0 processes the current queue and exits")
     g.add_argument("--theme", default=None,
-                   help="use resident Qwen to expand this theme into image prompts")
-    g.add_argument("--prompt-count", type=int, default=1,
-                   help="theme prompts to generate; 0 runs continuously")
-    g.add_argument("--watch", type=float, default=0, metavar="SECONDS",
-                   help="after finishing, keep rescanning source every SECONDS for new "
-                        "lines instead of exiting (for running as a service)")
+                   help="THEME MODE: use resident Qwen to expand this theme into prompts")
+    g.add_argument("--prompt-count", type=int, default=None,
+                   help="THEME MODE ONLY: prompt limit; omitted or 0 runs continuously")
 
     g = p.add_argument_group("resolution")
     g.add_argument("--aspect-ratio", default=d.aspect_ratio,
@@ -163,7 +165,7 @@ def build_config_parser() -> argparse.ArgumentParser:
                    help="number of independent images generated for each prompt")
 
     g = p.add_argument_group("sampling")
-    g.add_argument("--seed", type=_seed_argument, default=d.seed,
+    g.add_argument("--seed", type=_seed_argument, default="random",
                    help="integer seed or 'random' (chosen once at startup)")
     g.add_argument("--steps", type=int, default=d.steps,
                    help="base Krea 2 diffusion steps")
@@ -201,7 +203,7 @@ def build_config_parser() -> argparse.ArgumentParser:
     g = p.add_argument_group("UltimateSDUpscale")
     g.add_argument("--usdu-upscale-by", type=float, default=d.usdu_upscale_by,
                    help="UltimateSDUpscale output scale relative to the base image")
-    g.add_argument("--usdu-seed", type=_seed_argument, default=d.usdu_seed,
+    g.add_argument("--usdu-seed", type=_seed_argument, default="random",
                    help="integer seed or 'random' (chosen once at startup)")
     g.add_argument("--usdu-steps", type=int, default=d.usdu_steps,
                    help="diffusion steps per USDU tile")
@@ -231,7 +233,7 @@ def build_config_parser() -> argparse.ArgumentParser:
                    help="target short-edge pixels; aspect ratio is preserved")
     g.add_argument("--seedvr2-max-resolution", type=int, default=d.seedvr2.max_resolution,
                    help="long-edge pixel cap used to limit VRAM")
-    g.add_argument("--seedvr2-seed", type=_seed_argument, default=d.seedvr2.seed,
+    g.add_argument("--seedvr2-seed", type=_seed_argument, default="random",
                    help="32-bit integer seed or 'random' (chosen once at startup)")
     g.add_argument("--seedvr2-model", default=d.seedvr2.dit_model,
                    help="SeedVR2 DiT checkpoint under model-root/SEEDVR2")
@@ -573,22 +575,28 @@ def _resolve_input_mode(args: argparse.Namespace) -> str:
         raise SystemExit("theme must be a non-empty string")
     setattr(args, mode, value.strip())
 
-    if isinstance(args.prompt_count, bool) or not isinstance(args.prompt_count, int):
-        raise SystemExit("prompt-count must be an integer")
-    if args.prompt_count < 0:
-        raise SystemExit("prompt-count must be zero or greater")
-    if (
-        isinstance(args.watch, bool)
-        or not isinstance(args.watch, (int, float))
-        or not math.isfinite(args.watch)
-    ):
-        raise SystemExit("watch must be a finite number of seconds")
-    if args.watch < 0:
-        raise SystemExit("watch must be zero or greater")
-    if mode == "source" and args.prompt_count != 1:
-        raise SystemExit("prompt-count is only valid with theme")
-    if mode == "theme" and args.watch > 0:
-        raise SystemExit("watch requires source mode")
+    if mode == "source":
+        if args.prompt_count is not None:
+            raise SystemExit("prompt-count is only valid with theme")
+        if args.watch is None:
+            args.watch = DEFAULT_SOURCE_WATCH
+        if (
+            isinstance(args.watch, bool)
+            or not isinstance(args.watch, (int, float))
+            or not math.isfinite(args.watch)
+        ):
+            raise SystemExit("watch must be a finite number of seconds")
+        if args.watch < 0:
+            raise SystemExit("watch must be zero or greater")
+    else:
+        if args.watch is not None:
+            raise SystemExit("watch is only valid with source")
+        if args.prompt_count is None:
+            args.prompt_count = DEFAULT_THEME_PROMPT_COUNT
+        if isinstance(args.prompt_count, bool) or not isinstance(args.prompt_count, int):
+            raise SystemExit("prompt-count must be an integer")
+        if args.prompt_count < 0:
+            raise SystemExit("prompt-count must be zero or greater")
     return mode
 
 

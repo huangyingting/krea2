@@ -75,7 +75,13 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["sampler"] == "euler_ancestral"
     assert generated["log-level"] == "INFO"
     assert "log-file = " in file.read_text()
-    assert generated["prompt-count"] == 1
+    assert generated["seed"] == "random"
+    assert generated["usdu-seed"] == "random"
+    assert generated["seedvr2-seed"] == "random"
+    assert "prompt-count" not in generated
+    assert "watch" not in generated
+    assert "# prompt-count = 0" in file.read_text()
+    assert "# watch = 10" in file.read_text()
     assert "# theme = " in file.read_text()
     assert "# source = " in file.read_text()
     assert "prompt = " not in file.read_text()
@@ -103,7 +109,10 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert args.sampler_name == "euler_ancestral"
     assert args.run_seedvr2 is True
     assert args.output_dir == "output"
-    assert config_from_args(args) == config_from_args(parse_args([]))
+    cfg = config_from_args(args)
+    assert 0 <= cfg.seed <= cli.MAX_SEED
+    assert 0 <= cfg.usdu_seed <= cli.MAX_SEED
+    assert 0 <= cfg.seedvr2.seed <= cli.MAX_SEEDVR2
 
 
 def test_generate_config_refuses_to_overwrite(tmp_path):
@@ -304,7 +313,7 @@ def test_one_shot_prompt_ignores_queue_only_settings(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("mode_config", "expected_mode", "expected_value"),
     [
-        ('source = "/data/prompts"\n', "source", "/data/prompts"),
+        ('source = "/data/prompts"\nwatch = 0\n', "source", "/data/prompts"),
         ('theme = "quiet forest"\n', "theme", "quiet forest"),
     ],
 )
@@ -335,6 +344,26 @@ def test_main_routes_configured_input_mode(
     assert calls[0][:2] == (expected_mode, expected_value)
 
 
+def test_source_mode_polls_by_default(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('source = "/data/prompts"\n')
+    args = parse_args(["--config", str(file)])
+
+    assert cli._resolve_input_mode(args) == "source"
+    assert args.watch == cli.DEFAULT_SOURCE_WATCH
+    assert args.prompt_count is None
+
+
+def test_theme_mode_runs_continuously_by_default(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('theme = "forest"\n')
+    args = parse_args(["--config", str(file)])
+
+    assert cli._resolve_input_mode(args) == "theme"
+    assert args.prompt_count == 0
+    assert args.watch is None
+
+
 def test_generation_requires_a_config_file():
     with pytest.raises(SystemExit, match="generation requires --config"):
         main([])
@@ -362,7 +391,7 @@ def test_prompt_count_requires_theme(tmp_path):
 def test_watch_requires_source_mode(tmp_path):
     file = tmp_path / "krea2pipe.toml"
     file.write_text('theme = "forest"\nwatch = 5\n')
-    with pytest.raises(SystemExit, match="watch requires source mode"):
+    with pytest.raises(SystemExit, match="watch is only valid with source"):
         main(["--config", str(file)])
 
 

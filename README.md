@@ -262,15 +262,22 @@ settings live in TOML. Configuration switches such as `--source`, `--theme`,
 `--batch-size`, and `--device` are intentionally not accepted by the CLI.
 `prompt` is the opposite: it is CLI-only and is rejected in TOML.
 
+| Configured input | Default service behavior | Other-mode setting |
+| --- | --- | --- |
+| `source = "FILE_OR_DIR"` | Poll every 10 seconds | `prompt-count` is rejected |
+| `theme = "DESCRIPTION"` | Generate continuously | `watch` is rejected |
+| Both keys | Startup fails | Modes are mutually exclusive |
+
 For file queue mode, set `source` to one text file or directory. Each non-empty,
 non-comment line is one prompt; directories are scanned recursively in stable
 filename order. When `batch-size` is greater than one, every line produces
-that many images:
+that many images. Source mode polls every 10 seconds when `watch` is omitted;
+set `watch = 0` only for a finite batch that should exit after the current
+queue:
 
 ```toml
 source = "/data/krea2/prompts"
 batch-size = 2
-watch = 10
 ```
 
 ### Resident-Qwen theme mode
@@ -283,8 +290,10 @@ theme = "Quiet architecture where nature and technology coexist"
 prompt-count = 0
 ```
 
-`prompt-count` is the total number of prompts for that theme; zero runs
-continuously until interrupted. Qwen remains on the GPU across generation,
+`prompt-count` is optional and only valid in theme mode. Omitting it or setting
+it to zero runs continuously until interrupted; a positive value makes the
+theme run finite. `watch` is rejected in theme mode, just as `prompt-count` is
+rejected in source mode. Qwen remains on the GPU across generation,
 using Krea 2's official
 [`docs/expansion.txt`](https://github.com/krea-ai/krea-2/blob/db3984fbc6e13b34c0064990fc2d95ac64d00058/docs/expansion.txt)
 as its system prompt. Different deterministic sampling seeds produce a new

@@ -1,28 +1,28 @@
 # krea2pipe configuration
 #
 # Quick start:
-#   1. Uncomment `source` and point it at a prompt file or directory.
+#   1. Uncomment exactly one input mode: `source` or `theme`.
 #   2. Set `output-dir` to a persistent directory.
-#   3. Set `watch` above zero for a continuously running service.
-#   4. Run: krea2pipe --config krea2pipe.toml
+#   3. Run: krea2pipe --config krea2pipe.toml
 #
 # Use exactly one input mode: `source` or `theme`. For a one-time prompt,
 # pass `--prompt` on the CLI; all other settings still come from this file.
+# Source mode polls every 10 seconds by default; theme mode runs continuously.
 # Relative checkpoint names are
 # resolved below the absolute `model-root`; absolute checkpoints also work.
 # Keep this file flat: use these keys rather than TOML [section] tables.
 
 # --- input mode ---
-# prompt file or folder; one image is rendered per non-empty line and completed lines
-# are skipped on restart
+# SOURCE MODE: prompt file or folder; one image is rendered per non-empty line and
+# completed lines are skipped on restart
 # source = "/data/krea2/prompts"
-# use resident Qwen to expand this theme into image prompts
+# SOURCE MODE ONLY: polling interval; omitted uses 10 seconds, while 0 processes the
+# current queue and exits
+# watch = 10
+# THEME MODE: use resident Qwen to expand this theme into prompts
 # theme = "A visual theme for Qwen to expand into varied prompts"
-# theme prompts to generate; 0 runs continuously
-prompt-count = 1
-# after finishing, keep rescanning source every SECONDS for new lines instead of
-# exiting (for running as a service)
-watch = 0
+# THEME MODE ONLY: prompt limit; omitted or 0 runs continuously
+# prompt-count = 0
 
 # --- resolution ---
 # 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9
@@ -40,7 +40,7 @@ batch-size = 1
 
 # --- sampling (KSamplerAdvanced) ---
 # integer seed or 'random' (chosen once at startup)
-seed = 1099257494857840
+seed = "random"
 # base Krea 2 diffusion steps
 steps = 8
 # base guidance scale; 1 matches Krea 2 and skips negative guidance
@@ -70,7 +70,7 @@ upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
 # UltimateSDUpscale output scale relative to the base image
 usdu-upscale-by = 2.0
 # integer seed or 'random' (chosen once at startup)
-usdu-seed = 82616517812345
+usdu-seed = "random"
 # diffusion steps per USDU tile
 usdu-steps = 2
 # upscale sampler: euler or euler_ancestral
@@ -96,7 +96,7 @@ seedvr2-resolution = 4096
 # long-edge pixel cap used to limit VRAM
 seedvr2-max-resolution = 4096
 # 32-bit integer seed or 'random' (chosen once at startup)
-seedvr2-seed = 1234567892
+seedvr2-seed = "random"
 # SeedVR2 DiT checkpoint under model-root/SEEDVR2
 seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"
 # SeedVR2-internal correction: none, wavelet, adain, or lab
