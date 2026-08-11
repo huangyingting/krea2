@@ -1,5 +1,7 @@
 # Generate a complete default file with `krea2pipe --generate-config`.
 # This shorter example contains only the recommended service overrides.
+# Run it with `krea2pipe --config krea2pipe.example.toml`. Add
+# `--prompt "..."` to perform one-time generation with these same settings.
 #
 # Required for batch/service mode. This may be one prompt file or a directory;
 # directories are scanned recursively in filename order.

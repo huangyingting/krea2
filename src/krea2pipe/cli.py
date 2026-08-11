@@ -22,7 +22,6 @@ from .config import config_options, load_config, write_config_template
 from .seedvr2 import SeedVR2Config
 from .validation import DeviceConfigurationError, validate_settings
 from .workflow import (
-    DEFAULT_PROMPT,
     PipelineOutOfMemoryError,
     WorkflowConfig,
     expand_theme,
@@ -128,32 +127,25 @@ def _unit_float(value: object, option: str) -> float:
     return number
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_config_parser() -> argparse.ArgumentParser:
+    """Build the internal parser that defines TOML settings and defaults."""
     p = argparse.ArgumentParser(
         prog="krea2pipe",
-        description="Standalone Krea 2 image-generation and upscaling pipeline.",
+        add_help=False,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     d = WorkflowConfig()
 
-    g = p.add_argument_group("prompt")
-    g.add_argument("--config", "-c", default=None, metavar="FILE",
-                   help="TOML (or YAML) file of the options below; flags override it")
-    g.add_argument("--generate-config", nargs="?", const="krea2pipe.toml", default=None,
-                   metavar="FILE",
-                   help="write a complete default TOML config and exit "
-                        "(default file: krea2pipe.toml)")
-    p.add_argument("source", nargs="?", default=None, metavar="FILE_OR_DIR",
-                   help="prompt file, or a folder of prompt files; one image is rendered "
-                        "per non-empty line and completed lines are skipped on restart")
-    g.add_argument("--prompt", "-p", default=None,
-                   help=f"a single prompt (default: built-in demo prompt {DEFAULT_PROMPT[:40]!r}...)")
+    g = p.add_argument_group("input mode")
+    g.add_argument("--source", default=None, metavar="FILE_OR_DIR",
+                   help="prompt file or folder; one image is rendered per non-empty line "
+                        "and completed lines are skipped on restart")
     g.add_argument("--theme", default=None,
                    help="use resident Qwen to expand this theme into image prompts")
     g.add_argument("--prompt-count", type=int, default=1,
                    help="theme prompts to generate; 0 runs continuously")
     g.add_argument("--watch", type=float, default=0, metavar="SECONDS",
-                   help="after finishing, keep rescanning FILE_OR_DIR every SECONDS for new "
+                   help="after finishing, keep rescanning source every SECONDS for new "
                         "lines instead of exiting (for running as a service)")
 
     g = p.add_argument_group("resolution")
@@ -295,6 +287,38 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the public command-line interface."""
+    p = argparse.ArgumentParser(
+        prog="krea2pipe",
+        description="Standalone Krea 2 image-generation and upscaling pipeline.",
+    )
+    p.add_argument(
+        "--config",
+        "-c",
+        default=None,
+        metavar="FILE",
+        help="TOML generation configuration",
+    )
+    action = p.add_mutually_exclusive_group()
+    action.add_argument(
+        "--generate-config",
+        nargs="?",
+        const="krea2pipe.toml",
+        default=None,
+        metavar="FILE",
+        help="write a complete default TOML config and exit "
+             "(default file: krea2pipe.toml)",
+    )
+    action.add_argument(
+        "--prompt",
+        "-p",
+        default=None,
+        help="generate this prompt once, ignoring the configured source or theme",
+    )
+    return p
+
+
 def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
     defaults = WorkflowConfig()
     try:
@@ -386,12 +410,22 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse ``argv``, seeding the defaults from ``--config`` when one is given."""
-    parser = build_parser()
-    config_path = parser.parse_known_args(argv)[0].config
-    if config_path:
-        parser.set_defaults(**load_config(config_path, config_options(parser)))
-    return parser.parse_args(argv)
+    """Parse the small public CLI and merge it over the TOML-backed defaults."""
+    cli_args = build_parser().parse_args(argv)
+    settings_parser = build_config_parser()
+    if cli_args.config and not cli_args.generate_config:
+        configured = load_config(
+            cli_args.config,
+            config_options(settings_parser),
+        )
+        if "source" in configured and "theme" in configured:
+            raise SystemExit(
+                f"{cli_args.config}: configure either 'source' or 'theme', not both"
+            )
+        settings_parser.set_defaults(**configured)
+    args = settings_parser.parse_args([])
+    vars(args).update(vars(cli_args))
+    return args
 
 
 def _render(cfg: WorkflowConfig):
@@ -515,22 +549,30 @@ def _configure_logging(level_name: str, verbose: bool, log_file: str | None) -> 
     logging.captureWarnings(True)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    if args.generate_config:
-        path = write_config_template(args.generate_config, build_parser())
-        print(f"wrote {path}")
-        return 0
-    _configure_logging(args.log_level, args.verbose, args.log_file)
-    cfg = config_from_args(args)
-    if args.source is not None and not isinstance(args.source, str):
-        raise SystemExit("source must be a file or directory path")
-    if args.theme is not None and (
-        not isinstance(args.theme, str) or not args.theme.strip()
-    ):
+def _resolve_input_mode(args: argparse.Namespace) -> str:
+    """Validate input-only settings and return prompt, source, or theme."""
+    if args.prompt is not None:
+        if not isinstance(args.prompt, str) or not args.prompt.strip():
+            raise SystemExit("--prompt must be a non-empty string")
+        args.prompt = args.prompt.strip()
+        return "prompt"
+
+    if args.source is None and args.theme is None:
+        raise SystemExit(
+            "no input mode configured; set 'source' or 'theme' in TOML, "
+            "or pass --prompt for a one-time generation"
+        )
+    if args.source is not None and args.theme is not None:
+        raise SystemExit("configure either 'source' or 'theme', not both")
+
+    mode = "source" if args.source is not None else "theme"
+    value = getattr(args, mode)
+    if not isinstance(value, str) or not value.strip():
+        if mode == "source":
+            raise SystemExit("source must be a non-empty file or directory path")
         raise SystemExit("theme must be a non-empty string")
-    if args.theme is not None:
-        args.theme = args.theme.strip()
+    setattr(args, mode, value.strip())
+
     if isinstance(args.prompt_count, bool) or not isinstance(args.prompt_count, int):
         raise SystemExit("prompt-count must be an integer")
     if args.prompt_count < 0:
@@ -540,21 +582,35 @@ def main(argv: list[str] | None = None) -> int:
         or not isinstance(args.watch, (int, float))
         or not math.isfinite(args.watch)
     ):
-        raise SystemExit("--watch must be a finite number of seconds")
-    if args.source and args.prompt:
-        raise SystemExit("use either FILE_OR_DIR or --prompt, not both")
-    if args.theme and (args.source or args.prompt):
-        raise SystemExit("use theme, FILE_OR_DIR, or --prompt; do not combine them")
-    if not args.theme and args.prompt_count != 1:
-        raise SystemExit("prompt-count is only valid with theme")
-    if args.source and not cfg.save:
-        raise SystemExit("batch mode requires saving so completed lines can be resumed safely")
-    if args.theme and not cfg.save:
-        raise SystemExit("theme mode requires saving so generation can resume safely")
-    if args.watch > 0 and not args.source:
-        raise SystemExit("--watch requires FILE_OR_DIR")
+        raise SystemExit("watch must be a finite number of seconds")
     if args.watch < 0:
-        raise SystemExit("--watch must be zero or greater")
+        raise SystemExit("watch must be zero or greater")
+    if mode == "source" and args.prompt_count != 1:
+        raise SystemExit("prompt-count is only valid with theme")
+    if mode == "theme" and args.watch > 0:
+        raise SystemExit("watch requires source mode")
+    return mode
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.generate_config:
+        if args.config:
+            raise SystemExit("--config cannot be combined with --generate-config")
+        path = write_config_template(args.generate_config, build_config_parser())
+        print(f"wrote {path}")
+        return 0
+    if not args.config:
+        raise SystemExit(
+            "generation requires --config FILE; create one with --generate-config"
+        )
+    _configure_logging(args.log_level, args.verbose, args.log_file)
+    mode = _resolve_input_mode(args)
+    cfg = config_from_args(args)
+    if mode == "source" and not cfg.save:
+        raise SystemExit("batch mode requires saving so completed lines can be resumed safely")
+    if mode == "theme" and not cfg.save:
+        raise SystemExit("theme mode requires saving so generation can resume safely")
 
     lock = batch.OutputLock(cfg.output_dir) if cfg.save else nullcontext()
     try:
@@ -566,11 +622,11 @@ def main(argv: list[str] | None = None) -> int:
                 cfg.model_root,
                 cfg.output_dir if cfg.save else "(saving disabled)",
             )
-            if args.theme:
-                _render_theme(cfg, args.theme, args.prompt_count)
-                return 0
-            if not args.source:
+            if mode == "prompt":
                 _render(cfg)
+                return 0
+            if mode == "theme":
+                _render_theme(cfg, args.theme, args.prompt_count)
                 return 0
 
             _render_pending(cfg, args.source, announce_empty=True)

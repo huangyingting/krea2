@@ -26,19 +26,16 @@ accepted, and no conversion or external workflow runtime is required.
 uv sync                     # creates .venv and installs everything
 uv run krea2pipe --help
 
-# one image
-uv run krea2pipe --prompt "a red fox in a misty pine forest at dawn" -o output
-
-# batch: one image per non-empty line; a directory is scanned recursively
-uv run krea2pipe /data/krea2/prompts
-
-# one prompt, four independent images
-uv run krea2pipe -p "a red fox in a misty forest" --batch-size 4
-
 # generate, edit, and use a complete TOML configuration
 uv run krea2pipe --generate-config
 # $EDITOR krea2pipe.toml
+
+# run the source or theme queue configured in TOML
 uv run krea2pipe --config krea2pipe.toml
+
+# one-time prompt using the same TOML generation settings
+uv run krea2pipe --config krea2pipe.toml --prompt \
+  "a red fox in a misty pine forest at dawn"
 ```
 
 Python API:
@@ -55,10 +52,10 @@ base = result.stages["base"]    # every intermediate stage is kept
 ### Requirements
 
 * Python ≥ 3.12, CUDA GPU. Developed and tested on an **NVIDIA A100 80 GB**
-  (the full 4096² run peaks at **55 GB**; use `--seedvr2-resolution 2048` or
-  `--no-seedvr2` on smaller cards).
+  (the full 4096² run peaks at **55 GB**; set `seedvr2-resolution = 2048` or
+  `run-seedvr2 = false` in TOML on smaller cards).
 * A model library containing these category directories. Set its absolute path
-  with `model-root` in TOML or `--model-root` on the CLI:
+  with `model-root` in TOML:
 
 | Path (below `model-root`) | Purpose |
 | --- | --- |
@@ -86,7 +83,8 @@ base = result.stages["base"]    # every intermediate stage is kept
 | SeedVR2 diffusion upscaling | `seedvr2/` |
 
 `workflow.py` orchestrates these independent stages. `WorkflowConfig` contains
-their defaults and exposes every setting through Python, CLI flags, and TOML.
+their defaults and exposes every setting through Python and TOML. The CLI
+deliberately does not duplicate generation settings.
 
 ### SeedVR2
 
@@ -250,12 +248,29 @@ kernel path as modern PyTorch SDPA on this A100.
 
 ## Batch queue and service
 
-Pass one text file or a directory. Each non-empty, non-comment line is one
-prompt; directories are scanned recursively in stable filename order. When
-`batch-size` is greater than one, every line produces that many images:
+The public CLI has three actions:
 
-```bash
-uv run krea2pipe /data/krea2/prompts
+| Command | Behavior |
+| --- | --- |
+| `krea2pipe --config FILE` | Run the `source` or `theme` mode configured in TOML |
+| `krea2pipe --config FILE --prompt TEXT` | Generate `TEXT` once; configured source/theme queue settings are ignored |
+| `krea2pipe --generate-config [FILE]` | Write a complete documented TOML template and exit |
+
+Generation always requires `--config FILE`; only template generation does not.
+All model, sampling, resolution, stage, output, batch, queue, and logging
+settings live in TOML. Configuration switches such as `--source`, `--theme`,
+`--batch-size`, and `--device` are intentionally not accepted by the CLI.
+`prompt` is the opposite: it is CLI-only and is rejected in TOML.
+
+For file queue mode, set `source` to one text file or directory. Each non-empty,
+non-comment line is one prompt; directories are scanned recursively in stable
+filename order. When `batch-size` is greater than one, every line produces
+that many images:
+
+```toml
+source = "/data/krea2/prompts"
+batch-size = 2
+watch = 10
 ```
 
 ### Resident-Qwen theme mode
@@ -310,9 +325,11 @@ journalctl -u krea2pipe -f
 `--generate-config` writes `krea2pipe.toml` in the current directory. Pass a
 path to write elsewhere, for example
 `krea2pipe --generate-config /etc/krea2pipe.toml`. The generated file contains
-every supported default with comments; optional `source`, `prompt`, `width`,
+every supported default with comments; optional `source`, `theme`, `width`,
 and `height` entries are left commented. Existing files are never overwritten.
-Command-line flags take precedence over TOML values.
+Set exactly one of `source` or `theme` for configured queue operation. A
+one-shot `--prompt` ignores that configured input mode but retains every
+generation setting from the file.
 
 Common service settings use concise values and support independent sampling
 controls:
@@ -425,7 +442,7 @@ src/krea2pipe/
   blend.py         optional model-upscale / Lanczos / blend stage
   cli.py           `krea2pipe` command line entry point
   batch.py         prompt file/folder queue and persistent resume ledger
-  config.py        TOML/YAML service configuration
+  config.py        TOML service configuration
   accel.py         transparent backend tuning and regional torch.compile
   pipeline.py      Krea2Pipeline: encode / sample / decode
   sampling.py      ModelSamplingFlux, schedulers, euler & euler_ancestral

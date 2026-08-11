@@ -360,23 +360,32 @@ def test_resolution_selector_accepts_short_aspect_ratio():
     )
 
 
-def test_cli_parses_workflow_defaults():
-    from krea2pipe.cli import build_parser, config_from_args
+def test_config_parses_workflow_defaults(tmp_path):
+    from krea2pipe.cli import config_from_args, parse_args
 
-    cfg = config_from_args(build_parser().parse_args([]))
+    cfg = config_from_args(parse_args([]))
     assert cfg.resolve_size() == (1248, 1248)
     assert cfg.run_usdu and cfg.run_seedvr2 and cfg.run_blend and cfg.save
 
-    cfg = config_from_args(build_parser().parse_args(
-        ["--width", "512", "--height", "512", "--no-usdu", "--no-seedvr2", "--no-save",
-         "--seedvr2-resolution", "1024"]))
+    file = tmp_path / "settings.toml"
+    file.write_text(
+        "width = 512\n"
+        "height = 512\n"
+        "run-usdu = false\n"
+        "run-seedvr2 = false\n"
+        "save = false\n"
+        "seedvr2-resolution = 1024\n"
+    )
+    cfg = config_from_args(parse_args(["--config", str(file)]))
     assert cfg.resolve_size() == (512, 512)
     assert not cfg.run_usdu and not cfg.run_seedvr2 and not cfg.save
     assert cfg.seedvr2.resolution == 1024
 
 
-def test_cli_dtype_choice():
-    from krea2pipe.cli import build_parser, config_from_args
+def test_config_dtype_choice(tmp_path):
+    from krea2pipe.cli import config_from_args, parse_args
 
-    cfg = config_from_args(build_parser().parse_args(["--dtype", "float32"]))
+    file = tmp_path / "settings.toml"
+    file.write_text('dtype = "float32"\n')
+    cfg = config_from_args(parse_args(["--config", str(file)]))
     assert cfg.dtype is torch.float32

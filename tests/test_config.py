@@ -1,4 +1,4 @@
-"""TOML configuration and CLI precedence."""
+"""TOML configuration and the intentionally small public CLI."""
 
 from __future__ import annotations
 
@@ -27,12 +27,14 @@ def test_toml_config_supplies_service_options(tmp_path):
     assert args.steps == 6
 
 
-def test_command_line_overrides_config(tmp_path):
+def test_one_shot_prompt_keeps_toml_generation_settings(tmp_path):
     file = tmp_path / "krea2pipe.toml"
-    file.write_text('source = "/config/prompts"\nwatch = 30\n')
-    args = parse_args(["--config", str(file), "--watch", "5", "/cli/prompts"])
-    assert args.source == "/cli/prompts"
-    assert args.watch == 5
+    file.write_text('source = "/config/prompts"\nwatch = 30\nsteps = 6\n')
+    args = parse_args(["--config", str(file), "--prompt", "a fox"])
+    assert args.source == "/config/prompts"
+    assert args.watch == 30
+    assert args.steps == 6
+    assert args.prompt == "a fox"
 
 
 def test_config_rejects_unknown_options(tmp_path):
@@ -42,9 +44,23 @@ def test_config_rejects_unknown_options(tmp_path):
         parse_args(["--config", str(file)])
 
 
-def test_minimal_batch_cli_is_just_a_path():
-    args = parse_args(["/data/prompts"])
-    assert args.source == "/data/prompts"
+def test_config_rejects_non_toml_files(tmp_path):
+    file = tmp_path / "krea2pipe.yaml"
+    file.write_text("source: /data/prompts\n")
+    with pytest.raises(SystemExit, match=r"configuration must be a \.toml file"):
+        parse_args(["--config", str(file)])
+
+
+@pytest.mark.parametrize("option", [
+    ["/data/prompts"],
+    ["--theme", "forest"],
+    ["--watch", "5"],
+    ["--batch-size", "2"],
+    ["--device", "cpu"],
+])
+def test_public_cli_rejects_configuration_switches(option):
+    with pytest.raises(SystemExit):
+        parse_args(option)
 
 
 def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
@@ -61,6 +77,8 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert "log-file = " in file.read_text()
     assert generated["prompt-count"] == 1
     assert "# theme = " in file.read_text()
+    assert "# source = " in file.read_text()
+    assert "prompt = " not in file.read_text()
     from krea2pipe.workflow import WorkflowConfig
 
     assert generated["model-root"] == WorkflowConfig().model_root
@@ -94,6 +112,23 @@ def test_generate_config_refuses_to_overwrite(tmp_path):
     with pytest.raises(SystemExit, match="refusing to overwrite"):
         main(["--generate-config", str(file)])
     assert file.read_text() == "steps = 4\n"
+
+
+def test_generate_config_requires_toml_filename(tmp_path):
+    file = tmp_path / "krea2pipe.yaml"
+    with pytest.raises(SystemExit, match=r"must use a \.toml filename"):
+        main(["--generate-config", str(file)])
+    assert not file.exists()
+
+
+def test_generate_config_rejects_input_config(tmp_path):
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        main([
+            "--config",
+            str(tmp_path / "input.toml"),
+            "--generate-config",
+            str(tmp_path / "output.toml"),
+        ])
 
 
 def test_generate_config_uses_default_filename():
@@ -136,9 +171,11 @@ def test_toml_supports_random_seeds(tmp_path, monkeypatch):
     assert bits == [32, 64, 64]
 
 
-def test_seedvr2_rejects_a_seed_above_the_numpy_limit():
+def test_seedvr2_rejects_a_seed_above_the_numpy_limit(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(f"seedvr2-seed = {1 << 32}\n")
     with pytest.raises(SystemExit, match=r"seedvr2-seed: must be between 0 and 4294967295"):
-        config_from_args(parse_args(["--seedvr2-seed", str(1 << 32)]))
+        config_from_args(parse_args(["--config", str(file)]))
 
 
 def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkeypatch):
@@ -211,14 +248,122 @@ def test_theme_mode_resumes_with_saved_seeds(tmp_path, monkeypatch):
     assert rendered[-1].seedvr2.seed == 302
 
 
-def test_theme_cli_rejects_conflicting_prompt_sources():
-    with pytest.raises(SystemExit, match="do not combine"):
-        main(["--theme", "forest", "--prompt", "fox"])
+def test_toml_rejects_source_and_theme(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('source = "/data/prompts"\ntheme = "forest"\n')
+    with pytest.raises(SystemExit, match="either 'source' or 'theme', not both"):
+        parse_args(["--config", str(file)])
 
 
-def test_prompt_count_requires_theme():
+def test_toml_rejects_cli_only_prompt(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('prompt = "fox"\n')
+    with pytest.raises(SystemExit, match="'prompt' is CLI-only"):
+        parse_args(["--config", str(file)])
+
+
+def test_one_shot_prompt_ignores_configured_source(tmp_path, monkeypatch):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'source = "/does/not/exist"\n'
+        f'output-dir = "{tmp_path / "output"}"\n'
+    )
+    rendered = []
+    monkeypatch.setattr(
+        cli,
+        "_render",
+        lambda cfg: rendered.append(cfg) or SimpleNamespace(paths=["image.jpg"]),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_render_pending",
+        lambda *_args, **_kwargs: pytest.fail("configured source was not ignored"),
+    )
+
+    assert main(["--config", str(file), "--prompt", "  a fox  "]) == 0
+    assert [cfg.prompt for cfg in rendered] == ["a fox"]
+
+
+def test_one_shot_prompt_ignores_queue_only_settings(tmp_path, monkeypatch):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'theme = "forest"\n'
+        "prompt-count = -1\n"
+        "watch = -1\n"
+        f'output-dir = "{tmp_path / "output"}"\n'
+    )
+    monkeypatch.setattr(
+        cli,
+        "_render",
+        lambda _cfg: SimpleNamespace(paths=["image.jpg"]),
+    )
+
+    assert main(["--config", str(file), "--prompt", "a fox"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("mode_config", "expected_mode", "expected_value"),
+    [
+        ('source = "/data/prompts"\n', "source", "/data/prompts"),
+        ('theme = "quiet forest"\n', "theme", "quiet forest"),
+    ],
+)
+def test_main_routes_configured_input_mode(
+    tmp_path, monkeypatch, mode_config, expected_mode, expected_value
+):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        mode_config + f'output-dir = "{tmp_path / "output"}"\n'
+    )
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "_render_pending",
+        lambda _cfg, source, announce_empty: calls.append(
+            ("source", source, announce_empty)
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_render_theme",
+        lambda _cfg, theme, prompt_count: calls.append(
+            ("theme", theme, prompt_count)
+        ),
+    )
+
+    assert main(["--config", str(file)]) == 0
+    assert calls[0][:2] == (expected_mode, expected_value)
+
+
+def test_generation_requires_a_config_file():
+    with pytest.raises(SystemExit, match="generation requires --config"):
+        main([])
+
+
+def test_one_shot_prompt_requires_a_config_file():
+    with pytest.raises(SystemExit, match="generation requires --config"):
+        main(["--prompt", "a fox"])
+
+
+def test_config_requires_a_mode_without_one_shot_prompt(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text("steps = 6\n")
+    with pytest.raises(SystemExit, match="no input mode configured"):
+        main(["--config", str(file)])
+
+
+def test_prompt_count_requires_theme(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('source = "/data/prompts"\nprompt-count = 2\n')
     with pytest.raises(SystemExit, match="only valid with theme"):
-        main(["--prompt-count", "2"])
+        main(["--config", str(file)])
+
+
+def test_watch_requires_source_mode(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text('theme = "forest"\nwatch = 5\n')
+    with pytest.raises(SystemExit, match="watch requires source mode"):
+        main(["--config", str(file)])
 
 
 def test_toml_supports_multiple_loras_and_usdu_sampling(tmp_path):
@@ -242,15 +387,9 @@ def test_toml_supports_multiple_loras_and_usdu_sampling(tmp_path):
     assert cfg.usdu_scheduler == "sgm_uniform"
 
 
-def test_repeated_add_lora_cli_replaces_default_lora():
-    cfg = config_from_args(parse_args([
-        "--add-lora", "first.safetensors", "0.4",
-        "--add-lora", "second.safetensors", "0.75",
-    ]))
-    assert cfg.resolve_loras() == [
-        ("first.safetensors", 0.4),
-        ("second.safetensors", 0.75),
-    ]
+def test_public_cli_rejects_lora_overrides():
+    with pytest.raises(SystemExit):
+        parse_args(["--add-lora", "first.safetensors", "0.4"])
 
 
 def test_toml_rejects_malformed_lora(tmp_path):
@@ -320,4 +459,4 @@ def test_config_rejects_invalid_log_level(tmp_path):
     file = tmp_path / "krea2pipe.toml"
     file.write_text('log-level = "TRACE"\n')
     with pytest.raises(SystemExit, match="log-level must be"):
-        main(["--config", str(file), "--device", "cpu", "--no-save"])
+        main(["--config", str(file)])

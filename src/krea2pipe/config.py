@@ -1,15 +1,14 @@
 """Configuration file support and default TOML template generation.
 
-A config file is a flat mapping whose keys are the long CLI option names with
-``-`` or ``--`` optional, e.g.::
+A config file is a flat mapping of generation and queue settings, e.g.::
 
     source     = "/data/prompts"
     output-dir = "/data/renders"
     steps      = 8
     watch      = 60          # rescan every minute instead of exiting
 
-TOML is read with the standard library.  YAML is accepted too when PyYAML
-happens to be installed.  Command line flags always win over the file.
+TOML is read with the standard library.  The public CLI only selects this file
+or supplies a one-time prompt.
 ``krea2pipe --generate-config`` derives a complete template from the same
 argument parser, keeping the template and runtime defaults in sync.
 """
@@ -34,7 +33,6 @@ _TEMPLATE_SKIP = {"help", "config", "generate_config"}
 _TEMPLATE_HIDE = {"lora_name", "lora_strength"}
 _PLACEHOLDERS: dict[str, Any] = {
     "source": "/data/krea2/prompts",
-    "prompt": "A description of the image to generate",
     "theme": "A visual theme for Qwen to expand into varied prompts",
     "width": 1248,
     "height": 1248,
@@ -109,7 +107,9 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "#   3. Set `watch` above zero for a continuously running service.",
         "#   4. Run: krea2pipe --config krea2pipe.toml",
         "#",
-        "# Command-line options override this file. Relative checkpoint names are",
+        "# Use exactly one input mode: `source` or `theme`. For a one-time prompt,",
+        "# pass `--prompt` on the CLI; all other settings still come from this file.",
+        "# Relative checkpoint names are",
         "# resolved below the absolute `model-root`; absolute checkpoints also work.",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",
     ]
@@ -146,6 +146,8 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
 def write_config_template(path: str, parser: argparse.ArgumentParser) -> Path:
     """Create ``path`` with defaults, refusing to overwrite an existing file."""
     file = Path(path).expanduser()
+    if file.suffix.lower() != ".toml":
+        raise SystemExit(f"{file}: generated configuration must use a .toml filename")
     try:
         with file.open("x", encoding="utf-8") as fh:
             fh.write(render_config_template(parser))
@@ -157,15 +159,8 @@ def write_config_template(path: str, parser: argparse.ArgumentParser) -> Path:
 
 
 def _read(path: Path) -> dict[str, Any]:
-    if path.suffix.lower() in (".yaml", ".yml"):
-        try:
-            import yaml
-        except ImportError as exc:  # pragma: no cover - depends on optional dep
-            raise SystemExit(
-                f"{path} is YAML but PyYAML is not installed; use TOML or `uv add pyyaml`"
-            ) from exc
-        with open(path, encoding="utf-8") as fh:
-            return yaml.safe_load(fh) or {}
+    if path.suffix.lower() != ".toml":
+        raise SystemExit(f"{path}: configuration must be a .toml file")
     with open(path, "rb") as fh:
         return tomllib.load(fh)
 
@@ -196,6 +191,10 @@ def load_config(path: str, valid: set[str] | dict[str, str]) -> dict[str, Any]:
                 f"'{key}-resolution' instead of a [{key}] section"
             )
         normalized = key.lstrip("-").replace("_", "-")
+        if normalized == "prompt":
+            raise SystemExit(
+                f"{file}: 'prompt' is CLI-only; pass it with --prompt"
+            )
         dest = aliases.get(normalized)
         if dest is None:
             raise SystemExit(f"{file}: unknown option '{key}'")
