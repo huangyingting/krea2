@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
+from pathlib import Path
 import tomllib
+
+import pytest
 
 import krea2pipe.cli as cli
 from krea2pipe.cli import config_from_args, main, parse_args
@@ -182,3 +183,14 @@ def test_toml_controls_color_match_and_blend_modules(tmp_path):
     assert cfg.blend_upscale_model_name == "other-upscaler.pth"
     assert cfg.blend_mode == "screen"
     assert cfg.blend_factor == 0.25
+
+
+def test_service_example_exposes_every_optional_stage():
+    example = Path(__file__).parents[1] / "krea2pipe.example.toml"
+    cfg = config_from_args(parse_args(["--config", str(example)]))
+    assert cfg.run_usdu
+    assert cfg.run_color_match
+    assert cfg.run_seedvr2
+    assert cfg.run_blend
+    assert cfg.color_match_method == "hm-mkl-hm"
+    assert cfg.blend_upscale_model_name == "4xNomosWebPhoto_RealPLKSR.pth"

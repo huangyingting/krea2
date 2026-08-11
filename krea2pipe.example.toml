@@ -12,13 +12,47 @@ watch = 10
 # The resume ledger is stored here as .krea2pipe-progress.tsv.
 output-dir = "/data/krea2/output"
 
-# The workflow's performance-tuned defaults are used for everything else.
-# Override a value only when the requested output itself needs to change:
-# aspect-ratio = "1:1"
-# batch-size = 1               # independent images generated per prompt line
-# seed = 1099257494857840
-# steps = 8
-# extension = "jpg"
-# quality = 100
-# run-color-match = true
-# run-blend = true
+# --- Base generation -------------------------------------------------------
+aspect-ratio = "1:1"
+batch-size = 1
+seed = "random"
+steps = 8
+sampler = "euler_ancestral"
+scheduler = "sgm_uniform"
+
+# --- UltimateSDUpscale -----------------------------------------------------
+run-usdu = true
+upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
+usdu-upscale-by = 2.0
+usdu-seed = "random"
+usdu-steps = 2
+usdu-sampler = "euler"
+usdu-scheduler = "simple"
+usdu-denoise = 0.1
+usdu-mode = "Chess"
+
+# --- Standalone ColorMatch -------------------------------------------------
+# This is independent from SeedVR2's internal color correction.
+run-color-match = true
+color-match-method = "hm-mkl-hm"
+color-match-strength = 0.22
+
+# --- SeedVR2 ---------------------------------------------------------------
+run-seedvr2 = true
+seedvr2-resolution = 4096
+seedvr2-max-resolution = 4096
+seedvr2-seed = "random"
+seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"
+seedvr2-color-correction = "lab"
+
+# --- Separate model-upscale and blend -------------------------------------
+# This model may differ from the one used by USDU.
+run-blend = true
+blend-upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
+blend-mode = "normal"
+blend-factor = 0.4
+
+# --- Output ----------------------------------------------------------------
+extension = "jpg"
+quality = 100
+save-intermediates = false
