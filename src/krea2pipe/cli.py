@@ -19,6 +19,7 @@ import torch
 
 from . import batch, blend, color_match, loaders, sampling
 from .config import config_options, load_config, write_config_template
+from .prompting import EXPANSION_SYSTEM_PROMPT
 from .seedvr2 import SeedVR2Config
 from .validation import DeviceConfigurationError, validate_settings
 from .workflow import (
@@ -139,15 +140,19 @@ def build_config_parser() -> argparse.ArgumentParser:
     d = WorkflowConfig()
 
     g = p.add_argument_group("input mode")
+    g.add_argument("--prompt-mode", default="source",
+                   help="Select source or theme mode; ignored by CLI --prompt")
     g.add_argument("--source", default=None, metavar="FILE_OR_DIR",
                    help="SOURCE MODE: prompt file or folder; one image is rendered per "
                         "non-empty line and completed lines are skipped on restart")
-    g.add_argument("--watch", type=float, default=None, metavar="SECONDS",
+    g.add_argument("--watch", default=None, metavar="SECONDS",
                    help="SOURCE MODE ONLY: polling interval; omitted uses 10 seconds, "
                         "while 0 processes the current queue and exits")
     g.add_argument("--theme", default=None,
                    help="THEME MODE: use resident Qwen to expand this theme into prompts")
-    g.add_argument("--prompt-count", type=int, default=None,
+    g.add_argument("--theme-system-prompt", default=EXPANSION_SYSTEM_PROMPT,
+                   help="THEME MODE ONLY: Qwen system instructions used to expand themes")
+    g.add_argument("--prompt-count", default=None,
                    help="THEME MODE ONLY: prompt limit; omitted or 0 runs continuously")
 
     g = p.add_argument_group("resolution")
@@ -358,6 +363,7 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
     )
     cfg = WorkflowConfig(
         prompt=args.prompt,
+        theme_system_prompt=args.theme_system_prompt,
         model_root=model_root,
         unet_name=args.unet_name,
         clip_name=args.clip_name,
@@ -420,10 +426,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             cli_args.config,
             config_options(settings_parser),
         )
-        if "source" in configured and "theme" in configured:
-            raise SystemExit(
-                f"{cli_args.config}: configure either 'source' or 'theme', not both"
-            )
         settings_parser.set_defaults(**configured)
     args = settings_parser.parse_args([])
     vars(args).update(vars(cli_args))
@@ -475,6 +477,7 @@ def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
         cfg.output_dir,
         theme,
         {"base": cfg.seed, "usdu": cfg.usdu_seed, "seedvr2": cfg.seedvr2.seed},
+        cfg.theme_system_prompt,
     )
     seeds = progress.seeds
     cfg = replace(
@@ -559,25 +562,19 @@ def _resolve_input_mode(args: argparse.Namespace) -> str:
         args.prompt = args.prompt.strip()
         return "prompt"
 
-    if args.source is None and args.theme is None:
-        raise SystemExit(
-            "no input mode configured; set 'source' or 'theme' in TOML, "
-            "or pass --prompt for a one-time generation"
-        )
-    if args.source is not None and args.theme is not None:
-        raise SystemExit("configure either 'source' or 'theme', not both")
-
-    mode = "source" if args.source is not None else "theme"
+    mode = _require_choice(args.prompt_mode, {"source", "theme"}, "prompt-mode")
     value = getattr(args, mode)
     if not isinstance(value, str) or not value.strip():
         if mode == "source":
-            raise SystemExit("source must be a non-empty file or directory path")
-        raise SystemExit("theme must be a non-empty string")
+            raise SystemExit(
+                "prompt-mode is 'source', but source is not a non-empty path"
+            )
+        raise SystemExit(
+            "prompt-mode is 'theme', but theme is not a non-empty string"
+        )
     setattr(args, mode, value.strip())
 
     if mode == "source":
-        if args.prompt_count is not None:
-            raise SystemExit("prompt-count is only valid with theme")
         if args.watch is None:
             args.watch = DEFAULT_SOURCE_WATCH
         if (
@@ -589,14 +586,18 @@ def _resolve_input_mode(args: argparse.Namespace) -> str:
         if args.watch < 0:
             raise SystemExit("watch must be zero or greater")
     else:
-        if args.watch is not None:
-            raise SystemExit("watch is only valid with source")
         if args.prompt_count is None:
             args.prompt_count = DEFAULT_THEME_PROMPT_COUNT
         if isinstance(args.prompt_count, bool) or not isinstance(args.prompt_count, int):
             raise SystemExit("prompt-count must be an integer")
         if args.prompt_count < 0:
             raise SystemExit("prompt-count must be zero or greater")
+        if (
+            not isinstance(args.theme_system_prompt, str)
+            or not args.theme_system_prompt.strip()
+        ):
+            raise SystemExit("theme-system-prompt must be a non-empty string")
+        args.theme_system_prompt = args.theme_system_prompt.strip()
     return mode
 
 

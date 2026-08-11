@@ -1,57 +1,84 @@
-# krea2pipe configuration
+# Krea2pipe configuration
 #
 # Quick start:
-#   1. Uncomment exactly one input mode: `source` or `theme`.
-#   2. Set `output-dir` to a persistent directory.
-#   3. Run: krea2pipe --config krea2pipe.toml
+#   1. Select `prompt-mode = "source"` or `prompt-mode = "theme"`.
+#   2. Configure the matching source or theme block below.
+#   3. Set `output-dir` to a persistent directory.
+#   4. Run: krea2pipe --config krea2pipe.toml
 #
-# Use exactly one input mode: `source` or `theme`. For a one-time prompt,
-# pass `--prompt` on the CLI; all other settings still come from this file.
+# Only settings for the selected mode are used; the other mode is ignored.
+# For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.
 # Source mode polls every 10 seconds by default; theme mode runs continuously.
-# Relative checkpoint names are
-# resolved below the absolute `model-root`; absolute checkpoints also work.
+# Relative checkpoint names resolve below the absolute `model-root`.
+# Absolute checkpoint paths also work.
 # Keep this file flat: use these keys rather than TOML [section] tables.
 
-# --- input mode ---
+# --- Input mode ---
+# Select source or theme mode; ignored by CLI --prompt
+prompt-mode = "source"
+
 # SOURCE MODE: prompt file or folder; one image is rendered per non-empty line and
-# completed lines are skipped on restart
+# Completed lines are skipped on restart
 # source = "/data/krea2/prompts"
 # SOURCE MODE ONLY: polling interval; omitted uses 10 seconds, while 0 processes the
-# current queue and exits
+# Current queue and exits
 # watch = 10
+
 # THEME MODE: use resident Qwen to expand this theme into prompts
 # theme = "A visual theme for Qwen to expand into varied prompts"
+# THEME MODE ONLY: Qwen system instructions used to expand themes
+theme-system-prompt = '''
+You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt.
+
+Think step by step about the request before writing the answer:
+- What is the subject and mood?
+- What visual styles, mediums, and lighting options would fit? Consider two or three alternatives and pick the one that best serves the caption.
+- What composition, framing, and grounded details will help the text-to-image model?
+
+Then output a single expanded prompt paragraph.
+
+Follow these rules strictly:
+1. **Faithfulness First:** Preserve all original subjects, actions, colors, and spatial relationships. Do not add new objects, props, characters, or animals unless the user clearly implies them.
+2. **Practical T2I Structure:** Write a prompt that a text-to-image model can parse cleanly. Group subjects with their own attributes and actions. Use grounded phrasing for poses, interactions, and spatial layout.
+3. **Style Planning Stays Internal:** Use your internal reasoning to choose style, medium, framing, and lighting. Do not emit planning tags or wrappers in the visible answer body.
+4. **Text Rendering:** If the user requests visible text, quotes, labels, or typography, specify the exact text clearly and wrap requested words in quotes.
+5. **Avoid Over-Specification:** Do not invent highly specific clothing, colors, materials, or scene details unless the input supports them.
+6. **Structure:** Write one cohesive paragraph after the thinking block. No bullets, JSON, or markdown.
+7. **Respect Existing Detail:** If the user's prompt is already detailed, lightly polish and finalize rather than heavily expanding — preserve their phrasing and direction.
+8. **Respect the Human Form:** Treat depictions of people with dignity. Assume clothing covers genitals and intimate anatomy.
+9. **Preserve User Medium:** When the user explicitly requests a medium (e.g. "photo of", "photograph of", "illustration of", "painting of", "sketch of", "3D render of"), honor it. Do not pivot to a different medium to avoid difficulty — match the user's stated intent.'''
 # THEME MODE ONLY: prompt limit; omitted or 0 runs continuously
 # prompt-count = 0
 
-# --- resolution ---
+# --- Resolution ---
 # 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9
 aspect-ratio = "1:1"
-# approximate base-image area before USDU and SeedVR2 upscaling
+# Approximate base-image area before USDU and SeedVR2 upscaling
 megapixels = 1.5
-# round computed width and height to this model-safe multiple
+# Round computed width and height to this model-safe multiple
 multiple-of = 32
-# exact base width override; set height as well
+# Exact base width override; set height as well
 # width = 1248
-# exact base height override; set width as well
+# Exact base height override; set width as well
 # height = 1248
-# number of independent images generated for each prompt
+# Number of independent images generated for each prompt
 batch-size = 1
 
-# --- sampling (KSamplerAdvanced) ---
-# integer seed or 'random' (chosen once at startup)
+# --- Sampling ---
+# Integer seed or 'random' (chosen once at startup)
 seed = "random"
-# base Krea 2 diffusion steps
+# Base Krea 2 diffusion steps
 steps = 8
-# base guidance scale; 1 matches Krea 2 and skips negative guidance
+# Base guidance scale; 1 matches Krea 2 and skips negative guidance
 cfg = 1.0
-# base sampler: euler or euler_ancestral
+# Base sampler: euler or euler_ancestral
 sampler = "euler_ancestral"
-# base scheduler: normal, sgm_uniform, or simple
+# Base scheduler: normal, sgm_uniform, or simple
 scheduler = "sgm_uniform"
 
-# --- models ---
-# absolute root containing all model category directories
+# --- Models ---
+# Absolute root containing diffusion_models, text_encoders, vae, loras,
+# Upscale_models, and SEEDVR2
 model-root = "/data/ComfyUI/models"
 # Krea 2 checkpoint under model-root/diffusion_models
 unet = "moodyKrea2Mix_v50BF16.safetensors"
@@ -63,37 +90,37 @@ vae = "qwen_image_vae.safetensors"
 loras = [
   { name = "atmospheric photography.safetensors", strength = 0.6 },
 ]
-# model under model-root/upscale_models used by UltimateSDUpscale
+# Model under model-root/upscale_models used by UltimateSDUpscale
 upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
 
 # --- UltimateSDUpscale ---
 # UltimateSDUpscale output scale relative to the base image
 usdu-upscale-by = 2.0
-# integer seed or 'random' (chosen once at startup)
+# Integer seed or 'random' (chosen once at startup)
 usdu-seed = "random"
-# diffusion steps per USDU tile
+# Diffusion steps per USDU tile
 usdu-steps = 2
-# upscale sampler: euler or euler_ancestral
+# Upscale sampler: euler or euler_ancestral
 usdu-sampler = "euler"
-# upscale scheduler: normal, sgm_uniform, or simple
+# Upscale scheduler: normal, sgm_uniform, or simple
 usdu-scheduler = "simple"
-# tile denoise strength from 0 to 1; higher values alter more detail
+# Tile denoise strength from 0 to 1; higher values alter more detail
 usdu-denoise = 0.1
-# tile traversal/seam-fixing mode: Linear, Chess, or None
+# Tile traversal/seam-fixing mode: Linear, Chess, or None
 usdu-mode = "Chess"
 
 # --- ColorMatch ---
-# run the standalone ColorMatch stage
+# Run the standalone ColorMatch stage
 run-color-match = true
-# color transfer: default, hm, reinhard, mvgd, mkl, hm-mvgd-hm, or hm-mkl-hm
+# Color transfer: default, hm, reinhard, mvgd, mkl, hm-mvgd-hm, or hm-mkl-hm
 color-match-method = "hm-mkl-hm"
-# transfer strength from 0 (off) to 1 (full)
+# Transfer strength from 0 (off) to 1 (full)
 color-match-strength = 0.22
 
 # --- SeedVR2 ---
-# target short-edge pixels; aspect ratio is preserved
+# Target short-edge pixels; aspect ratio is preserved
 seedvr2-resolution = 4096
-# long-edge pixel cap used to limit VRAM
+# Long-edge pixel cap used to limit VRAM
 seedvr2-max-resolution = 4096
 # 32-bit integer seed or 'random' (chosen once at startup)
 seedvr2-seed = "random"
@@ -103,44 +130,44 @@ seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"
 seedvr2-color-correction = "lab"
 
 # --- Upscale blend ---
-# run the separate model-upscale/Lanczos/blend stage
+# Run the separate model-upscale/Lanczos/blend stage
 run-blend = true
-# model under model-root/upscale_models used only by final blend
+# Model under model-root/upscale_models used only by final blend
 blend-upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
-# blend strength from 0 to 1
+# Blend strength from 0 to 1
 blend-factor = 0.4
-# normal, multiply, screen, overlay, soft_light, or difference
+# Normal, multiply, screen, overlay, soft_light, or difference
 blend-mode = "normal"
 
-# --- output ---
-# persistent output root; also stores the batch resume ledger
+# --- Output ---
+# Persistent output root; also stores the batch resume ledger
 output-dir = "output"
-# filename template; supports %time, %date, %width, %height, %counter
+# Filename template; supports %time, %date, %width, %height, %counter
 filename = "%time"
-# subdirectory created below output-dir; empty writes to the root
+# Subdirectory created below output-dir; empty writes to the root
 subdir = "AIKC"
-# output image format: png, jpg, jpeg, or webp
+# Output image format: png, jpg, jpeg, or webp
 extension = "jpg"
 # JPEG/WebP quality from 1 to 100
 quality = 100
-# also write the base / USDU / ColorMatch / SeedVR2 stages
+# Also write the base / USDU / ColorMatch / SeedVR2 stages
 save-intermediates = false
-# write generated images to disk
+# Write generated images to disk
 save = true
 
-# --- stages / runtime ---
-# run UltimateSDUpscale
+# --- Stages / runtime ---
+# Run UltimateSDUpscale
 run-usdu = true
-# run the SeedVR2 upscaler
+# Run the SeedVR2 upscaler
 run-seedvr2 = true
 # PyTorch device; use cuda for the supported production path
 device = "cuda"
-# model compute precision; keep bfloat16 unless debugging or using hardware without
-# bfloat16 support
+# Model compute precision; keep bfloat16 unless debugging or using hardware without
+# Bfloat16 support
 dtype = "bfloat16"
-# minimum severity written to the console and log file
+# Minimum severity written to the console and log file
 log-level = "INFO"
-# optional rotating log file (10 MiB, five backups)
+# Optional rotating log file (10 MiB, five backups)
 # log-file = "/data/krea2/logs/krea2pipe.log"
-# enable DEBUG logging, overriding log-level
+# Enable DEBUG logging, overriding log-level
 verbose = false

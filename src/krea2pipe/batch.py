@@ -17,6 +17,8 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Iterator
 
+from .prompting import EXPANSION_SYSTEM_PROMPT
+
 #: Text extensions considered prompt files when a folder is given.
 PROMPT_SUFFIXES = (".txt", ".text", ".prompt", ".prompts")
 
@@ -159,10 +161,16 @@ class ThemeProgress:
     """Atomic progress and resolved seeds for resumable theme generation."""
 
     def __init__(self, output_dir: str | os.PathLike, theme: str,
-                 seeds: dict[str, int]):
+                 seeds: dict[str, int],
+                 system_prompt: str = EXPANSION_SYSTEM_PROMPT):
         self.path = Path(output_dir).expanduser() / THEME_PROGRESS_NAME
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.key = blake2b(theme.encode(), digest_size=16).hexdigest()
+        identity = (
+            theme
+            if system_prompt == EXPANSION_SYSTEM_PROMPT
+            else f"{theme}\0{system_prompt}"
+        )
+        self.key = blake2b(identity.encode(), digest_size=16).hexdigest()
         if self.path.exists():
             try:
                 self.state = json.loads(self.path.read_text(encoding="utf-8"))
@@ -183,6 +191,7 @@ class ThemeProgress:
         if entry is None:
             entry = {
                 "theme": theme,
+                "system_prompt": system_prompt,
                 "next_index": 0,
                 "seeds": dict(seeds),
             }
@@ -190,6 +199,8 @@ class ThemeProgress:
             self._write()
         elif entry.get("theme") != theme:
             raise ThemeProgressError(f"theme digest collision in {self.path}")
+        elif entry.get("system_prompt", EXPANSION_SYSTEM_PROMPT) != system_prompt:
+            raise ThemeProgressError(f"theme system prompt mismatch in {self.path}")
         self.entry = entry
 
     @property

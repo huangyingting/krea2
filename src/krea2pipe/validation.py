@@ -78,6 +78,7 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         if any(value is None for value in expansion_values):
             raise ValueError("prompt theme, index, and seed must be configured together")
         _string(cfg.prompt_theme, "prompt theme")
+        _string(cfg.theme_system_prompt, "theme system prompt")
         _integer(cfg.prompt_index, "prompt index")
         _integer(cfg.prompt_seed, "prompt seed")
         if cfg.prompt_index < 0:

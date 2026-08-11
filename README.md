@@ -262,11 +262,15 @@ settings live in TOML. Configuration switches such as `--source`, `--theme`,
 `--batch-size`, and `--device` are intentionally not accepted by the CLI.
 `prompt` is the opposite: it is CLI-only and is rejected in TOML.
 
-| Configured input | Default service behavior | Other-mode setting |
+`prompt-mode` explicitly selects the active configuration block:
+
+| `prompt-mode` | Used settings | Ignored settings |
 | --- | --- | --- |
-| `source = "FILE_OR_DIR"` | Poll every 10 seconds | `prompt-count` is rejected |
-| `theme = "DESCRIPTION"` | Generate continuously | `watch` is rejected |
-| Both keys | Startup fails | Modes are mutually exclusive |
+| `"source"` | `source`, `watch` | `theme`, `theme-system-prompt`, `prompt-count` |
+| `"theme"` | `theme`, `theme-system-prompt`, `prompt-count` | `source`, `watch` |
+
+Both blocks may remain configured, making mode changes a one-line edit. CLI
+`--prompt` is the one-time mode and ignores both configured blocks.
 
 For file queue mode, set `source` to one text file or directory. Each non-empty,
 non-comment line is one prompt; directories are scanned recursively in stable
@@ -276,6 +280,7 @@ set `watch = 0` only for a finite batch that should exit after the current
 queue:
 
 ```toml
+prompt-mode = "source"
 source = "/data/krea2/prompts"
 batch-size = 2
 ```
@@ -286,24 +291,29 @@ Instead of supplying prompt files, provide a theme and let the same Qwen3-VL
 model used for Krea conditioning expand it into varied prompts:
 
 ```toml
+prompt-mode = "theme"
 theme = "Quiet architecture where nature and technology coexist"
 prompt-count = 0
 ```
 
-`prompt-count` is optional and only valid in theme mode. Omitting it or setting
-it to zero runs continuously until interrupted; a positive value makes the
-theme run finite. `watch` is rejected in theme mode, just as `prompt-count` is
-rejected in source mode. Qwen remains on the GPU across generation,
+`prompt-count` is optional. Omitting it or setting it to zero runs continuously
+until interrupted; a positive value makes the theme run finite. `watch` and
+all other source settings are ignored in this mode. Qwen remains on the GPU
+across generation,
 using Krea 2's official
 [`docs/expansion.txt`](https://github.com/krea-ai/krea-2/blob/db3984fbc6e13b34c0064990fc2d95ac64d00058/docs/expansion.txt)
-as its system prompt. Different deterministic sampling seeds produce a new
-expanded paragraph for each index. Expansion takes about 6 seconds on the
-target A100 and is performed before the image pipeline.
+as its default system prompt. Override `theme-system-prompt` with a TOML
+multiline string to customize Qwen's expansion behavior. Different
+deterministic sampling seeds produce a new expanded paragraph for each index.
+Expansion takes about 6 seconds on the target A100 and is performed before the
+image pipeline.
 
 The theme may specify its output language directly, for example:
 
 ```toml
+prompt-mode = "theme"
 theme = "请只用中文输出。主题：一座自然与科技和谐共存的未来城市。"
+theme-system-prompt = "请将主题扩写成一个详细的中文图像生成提示词。"
 ```
 
 Theme progress, the resolved base/USDU/SeedVR2 seeds, and the next prompt index
@@ -336,9 +346,9 @@ path to write elsewhere, for example
 `krea2pipe --generate-config /etc/krea2pipe.toml`. The generated file contains
 every supported default with comments; optional `source`, `theme`, `width`,
 and `height` entries are left commented. Existing files are never overwritten.
-Set exactly one of `source` or `theme` for configured queue operation. A
-one-shot `--prompt` ignores that configured input mode but retains every
-generation setting from the file.
+Set `prompt-mode` to select one configured block; the other block is ignored.
+A one-shot `--prompt` ignores both blocks but retains every generation setting
+from the file.
 
 Common service settings use concise values and support independent sampling
 controls:

@@ -186,13 +186,16 @@ class Krea2TextEncoder(torch.nn.Module):
         top_k: int = 50,
         top_p: float = 0.9,
         repetition_penalty: float = 1.05,
+        system_prompt: str = EXPANSION_SYSTEM_PROMPT,
     ) -> str:
         """Expand a theme using the checkpoint's tied token embeddings as its LM head."""
         if not theme.strip():
             raise ValueError("theme must not be empty")
+        if not isinstance(system_prompt, str) or not system_prompt.strip():
+            raise ValueError("system prompt must not be empty")
         self.to_device()
         conversation = (
-            f"<|im_start|>system\n{EXPANSION_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>system\n{system_prompt.strip()}<|im_end|>\n"
             f"<|im_start|>user\n{theme.strip()}<|im_end|>\n"
             "<|im_start|>assistant\n"
         )

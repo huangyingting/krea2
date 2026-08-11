@@ -84,6 +84,8 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
+        if "\n" in value and "'''" not in value:
+            return f"'''\n{value}'''"
         return json.dumps(value, ensure_ascii=True)
     if isinstance(value, (int, float)):
         return repr(value)
@@ -101,18 +103,19 @@ def _toml_value(value: Any) -> str:
 def render_config_template(parser: argparse.ArgumentParser) -> str:
     """Return a documented flat TOML file containing every TOML default."""
     lines = [
-        "# krea2pipe configuration",
+        "# Krea2pipe configuration",
         "#",
         "# Quick start:",
-        "#   1. Uncomment exactly one input mode: `source` or `theme`.",
-        "#   2. Set `output-dir` to a persistent directory.",
-        "#   3. Run: krea2pipe --config krea2pipe.toml",
+        "#   1. Select `prompt-mode = \"source\"` or `prompt-mode = \"theme\"`.",
+        "#   2. Configure the matching source or theme block below.",
+        "#   3. Set `output-dir` to a persistent directory.",
+        "#   4. Run: krea2pipe --config krea2pipe.toml",
         "#",
-        "# Use exactly one input mode: `source` or `theme`. For a one-time prompt,",
-        "# pass `--prompt` on the CLI; all other settings still come from this file.",
+        "# Only settings for the selected mode are used; the other mode is ignored.",
+        "# For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.",
         "# Source mode polls every 10 seconds by default; theme mode runs continuously.",
-        "# Relative checkpoint names are",
-        "# resolved below the absolute `model-root`; absolute checkpoints also work.",
+        "# Relative checkpoint names resolve below the absolute `model-root`.",
+        "# Absolute checkpoint paths also work.",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",
     ]
     seen: set[str] = set()
@@ -125,14 +128,17 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         ]
         if not actions:
             continue
-        lines.extend(("", f"# --- {group.title} ---"))
+        title = group.title[:1].upper() + group.title[1:]
+        lines.extend(("", f"# --- {title} ---"))
         for action in actions:
+            if action.dest in {"source", "theme"}:
+                lines.append("")
             seen.add(action.dest)
             key = _preferred_key(action)
             help_text = _HELP_OVERRIDES.get(action.dest, action.help)
             if help_text and help_text is not argparse.SUPPRESS:
                 for line in wrap(str(help_text), width=84):
-                    lines.append(f"# {line}")
+                    lines.append(f"# {line[:1].upper() + line[1:]}")
             value = action.default
             if action.dest in _TEMPLATE_DEFAULTS:
                 value = _TEMPLATE_DEFAULTS[action.dest]

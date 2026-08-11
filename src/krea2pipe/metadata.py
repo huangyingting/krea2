@@ -11,13 +11,13 @@ import torch
 from PIL import Image
 
 from . import __version__
-from .prompting import EXPANSION_SOURCE
+from .prompting import EXPANSION_SOURCE, EXPANSION_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from .workflow import WorkflowConfig
 
 SCHEMA = "krea2pipe.generation"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PNG_KEY = "krea2pipe"
 
 
@@ -44,7 +44,12 @@ def build_generation_manifest(
             "theme": cfg.prompt_theme,
             "index": cfg.prompt_index,
             "seed": cfg.prompt_seed,
-            "system_prompt": EXPANSION_SOURCE,
+            "system_prompt": cfg.theme_system_prompt,
+            "system_prompt_source": (
+                EXPANSION_SOURCE
+                if cfg.theme_system_prompt == EXPANSION_SYSTEM_PROMPT
+                else None
+            ),
         }
     return {
         "schema": SCHEMA,

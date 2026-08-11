@@ -13,6 +13,7 @@ from . import accel, loaders, sampling
 from .models import vae as vae_module
 from .models.dit import SingleStreamDiT
 from .models.vae import WanVAE
+from .prompting import EXPANSION_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,14 @@ class Krea2Pipeline:
         """``CLIPTextEncode`` -> (1, seq, txtlayers*txtdim) conditioning."""
         return self.text_encoder.encode(prompt)
 
-    def expand_theme(self, theme: str, seed: int) -> str:
+    def expand_theme(
+        self,
+        theme: str,
+        seed: int,
+        system_prompt: str = EXPANSION_SYSTEM_PROMPT,
+    ) -> str:
         """Generate one image prompt with the same resident Qwen model used for encoding."""
-        return self.text_encoder.generate_prompt(theme, seed)
+        return self.text_encoder.generate_prompt(theme, seed, system_prompt=system_prompt)
 
     @staticmethod
     def empty_latent(width: int, height: int, batch_size: int = 1) -> Tensor:

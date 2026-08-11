@@ -114,6 +114,19 @@ def test_theme_progress_tracks_themes_independently(tmp_path):
     ).next_index == 1
 
 
+def test_theme_progress_tracks_system_prompts_independently(tmp_path):
+    seeds = {"base": 1, "usdu": 2, "seedvr2": 3}
+    first = batch.ThemeProgress(tmp_path, "ocean", seeds, "Use Chinese.")
+    first.mark_completed(0)
+
+    second = batch.ThemeProgress(tmp_path, "ocean", seeds, "Use English.")
+
+    assert second.next_index == 0
+    assert batch.ThemeProgress(
+        tmp_path, "ocean", seeds, "Use Chinese."
+    ).next_index == 1
+
+
 def test_theme_progress_rejects_out_of_order_completion(tmp_path):
     progress = batch.ThemeProgress(
         tmp_path, "theme", {"base": 1, "usdu": 2, "seedvr2": 3}

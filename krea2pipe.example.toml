@@ -3,18 +3,26 @@
 # Run it with `krea2pipe --config krea2pipe.example.toml`. Add
 # `--prompt "..."` to perform one-time generation with these same settings.
 #
-# Required for batch/service mode. This may be one prompt file or a directory;
-# directories are scanned recursively in filename order.
+# Select which block is active. Settings in the other block are ignored.
+prompt-mode = "source"
+
+# --- Source mode -----------------------------------------------------------
+# This may be one prompt file or a directory. Directories are scanned
+# Recursively in filename order.
 source = "/data/krea2/prompts"
 
 # Keep the process alive and rescan for appended/new prompt lines. Loaded
-# models and compiled graphs remain resident, so subsequent images are fast.
+# Models and compiled graphs remain resident, so subsequent images are fast.
 watch = 10
 
-# Alternatively, remove `source` and `watch`, then enable resident-Qwen theme
-# expansion. Zero means generate continuously until the service is stopped.
-# theme = "Quiet architecture where nature and technology coexist"
-# prompt-count = 0
+# --- Theme mode ------------------------------------------------------------
+# Change only prompt-mode to "theme" to activate these settings.
+theme = "Quiet architecture where nature and technology coexist"
+# Omit theme-system-prompt to use the official Krea expansion instructions,
+# Or set it to custom Qwen system instructions.
+# theme-system-prompt = "Expand the theme into one detailed Chinese image prompt."
+# Zero means generate continuously until the service is stopped.
+prompt-count = 0
 
 # The resume ledger is stored here as .krea2pipe-progress.tsv.
 output-dir = "/data/krea2/output"
@@ -69,6 +77,6 @@ save-intermediates = false
 
 # --- Runtime logging -------------------------------------------------------
 # Console logs are captured by journald under systemd. Set log-file to keep an
-# additional local rotating log (10 MiB per file, five backups).
+# Additional local rotating log (10 MiB per file, five backups).
 log-level = "INFO"
 # log-file = "/data/krea2/logs/krea2pipe.log"

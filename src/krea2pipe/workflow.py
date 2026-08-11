@@ -17,6 +17,7 @@ from torch import Tensor
 from . import accel, blend, color_match, loaders, metadata, nodes, usdu
 from .imageutil import get_image_size
 from .pipeline import Krea2Models, Krea2Pipeline
+from .prompting import EXPANSION_SYSTEM_PROMPT
 from .seedvr2 import SeedVR2Config
 from .validation import preflight
 
@@ -39,6 +40,7 @@ class WorkflowConfig:
     prompt_theme: Optional[str] = None
     prompt_index: Optional[int] = None
     prompt_seed: Optional[int] = None
+    theme_system_prompt: str = EXPANSION_SYSTEM_PROMPT
 
     # --- models ---
     model_root: str = loaders.DEFAULT_MODEL_ROOT
@@ -274,7 +276,11 @@ def release_models() -> None:
 def expand_theme(config: WorkflowConfig, theme: str, seed: int) -> str:
     """Expand one theme using the cached Qwen model."""
     preflight(config)
-    return _cached_pipeline(config).expand_theme(theme, seed)
+    return _cached_pipeline(config).expand_theme(
+        theme,
+        seed,
+        config.theme_system_prompt,
+    )
 
 
 def run_workflow(config: WorkflowConfig | None = None,

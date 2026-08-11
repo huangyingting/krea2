@@ -61,6 +61,27 @@ def test_qwen_expands_theme_with_official_system_prompt():
     assert "<|im_start|>user\na quiet forest<|im_end|>" in encoder.tokenizer.input
 
 
+def test_qwen_uses_a_custom_system_prompt():
+    encoder = Krea2TextEncoder.__new__(Krea2TextEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.device = torch.device("cpu")
+    encoder.model = _CausalTextModel()
+    encoder.tokenizer = _Tokenizer()
+    encoder._on_device = False
+
+    encoder.generate_prompt(
+        "a quiet forest",
+        seed=123,
+        system_prompt="Write the expanded prompt in Chinese.",
+        max_new_tokens=8,
+    )
+
+    assert (
+        "<|im_start|>system\nWrite the expanded prompt in Chinese.<|im_end|>"
+        in encoder.tokenizer.input
+    )
+
+
 def test_qwen_rejects_empty_theme():
     encoder = Krea2TextEncoder.__new__(Krea2TextEncoder)
     torch.nn.Module.__init__(encoder)
