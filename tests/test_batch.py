@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from krea2pipe import batch
@@ -113,55 +111,86 @@ def test_source_queue_accepts_an_explicit_file_with_any_extension(tmp_path):
         assert queue.counts() == (1, 0, 1)
 
 
-def test_source_queue_applies_gitignore_patterns(tmp_path):
+def test_source_spec_canonicalizes_symlinked_inputs(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    prompt = source / "prompt.txt"
+    prompt.write_text("prompt\n")
+    link = tmp_path / "linked-source"
+    link.symlink_to(source, target_is_directory=True)
+
+    spec = batch.SourceSpec([f"{link}/**/*.txt"])
+
+    assert list(spec.iter_files()) == [prompt]
+    assert spec.watch_roots == (source,)
+
+
+def test_source_queue_applies_unified_include_and_exclude_globs(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "keep.txt").write_text("keep\n")
-    (source / "draft.txt").write_text("draft\n")
+    (source / "draft-a.txt").write_text("draft\n")
     archive = source / "archive"
     archive.mkdir()
     (archive / "old.txt").write_text("old\n")
+    nested = source / "nested"
+    nested.mkdir()
+    (nested / "photo-1.data").write_text("photo\n")
+    (nested / "photo-x.data").write_text("wrong class\n")
 
-    source_filter = batch.SourceFilter(
-        ignore=("archive/", "draft.txt"),
-    )
-    with batch.SourceQueue(source, tmp_path / "output", source_filter) as queue:
+    sources = [
+        f"{source}/**/*.txt",
+        f"{source}/**/photo-[0-9].data",
+        f"!{source}/archive/**",
+        f"!{source}/**/draft-?.txt",
+    ]
+    with batch.SourceQueue(sources, tmp_path / "output") as queue:
         queue.reconcile()
-        assert queue.counts() == (1, 0, 1)
+        assert queue.counts() == (2, 0, 2)
         assert queue.next_pending().text == "keep"
 
 
-def test_source_queue_filters_paths_prompts_and_timestamps(tmp_path):
+def test_source_spec_resolves_relative_globs_and_derives_watch_roots(
+    tmp_path, monkeypatch
+):
     source = tmp_path / "source"
     source.mkdir()
-    included = source / "include.data"
-    included.write_text("keep portrait\nskip landscape\n")
-    excluded = source / "exclude.txt"
-    excluded.write_text("keep portrait\n")
-    timestamp = 1_800_000_000
-    os.utime(included, (timestamp, timestamp))
-    os.utime(excluded, (timestamp, timestamp))
+    archive = source / "archive"
+    archive.mkdir()
+    keep = source / "keep.txt"
+    keep.write_text("keep\n")
+    (archive / "old.txt").write_text("old\n")
+    monkeypatch.chdir(tmp_path)
 
-    source_filter = batch.SourceFilter(
-        file_regex=r"include\.data$",
-        prompt_regex="portrait",
-        modified_after="2027-01-15T00:00:00Z",
-        modified_before="2027-02-01T00:00:00Z",
+    spec = batch.SourceSpec(["source/**/*.txt", "!source/archive/**"])
+
+    assert list(spec.iter_files()) == [keep]
+    assert spec.watch_roots == (source,)
+    assert spec.identity == (
+        str(source / "**" / "*.txt"),
+        f"!{source / 'archive' / '**'}",
     )
-    with batch.SourceQueue(source, tmp_path / "output", source_filter) as queue:
-        queue.reconcile()
-        assert queue.counts() == (1, 0, 1)
-        assert queue.next_pending().text == "keep portrait"
 
 
-def test_source_filter_rejects_invalid_patterns_and_time_windows():
-    with pytest.raises(ValueError, match="invalid regular expression"):
-        batch.SourceFilter(file_regex="[")
-    with pytest.raises(ValueError, match="must be earlier"):
-        batch.SourceFilter(
-            modified_after="2027-02-01T00:00:00Z",
-            modified_before="2027-01-01T00:00:00Z",
-        )
+def test_source_glob_star_does_not_cross_directory_boundaries(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    top = source / "top.txt"
+    top.write_text("top\n")
+    nested = source / "nested"
+    nested.mkdir()
+    (nested / "nested.txt").write_text("nested\n")
+
+    spec = batch.SourceSpec([f"{source}/*.txt"])
+
+    assert list(spec.iter_files()) == [top]
+
+
+def test_source_spec_requires_a_positive_existing_root(tmp_path):
+    with pytest.raises(ValueError, match="at least one positive"):
+        batch.SourceSpec([f"!{tmp_path}/archive/**"])
+    with pytest.raises(FileNotFoundError, match="source glob root"):
+        batch.SourceSpec([f"{tmp_path}/missing/**/*.txt"])
 
 
 def test_source_queue_indexes_only_appended_lines(tmp_path):
@@ -261,11 +290,14 @@ def test_source_watcher_incrementally_updates_queue(tmp_path):
     source.mkdir()
     output = tmp_path / "output"
 
+    spec = batch.SourceSpec([f"{source}/**/*.prompts"])
     with (
-        batch.SourceQueue(source, output) as queue,
-        batch.SourceWatcher(source) as watcher,
+        batch.SourceQueue(spec, output) as queue,
+        batch.SourceWatcher(spec) as watcher,
     ):
         queue.reconcile()
+        ignored = source / "ignored.txt"
+        ignored.write_text("ignored prompt\n")
         file = source / "new.prompts"
         file.write_text("new prompt\n")
         queue.update_paths(watcher.wait(5))

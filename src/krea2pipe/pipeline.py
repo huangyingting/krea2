@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 from dataclasses import dataclass, field
 
 import torch
@@ -38,14 +39,19 @@ class Krea2Pipeline:
         self.dtype = self.config.dtype
         self.model_sampling = sampling.ModelSamplingFlux(shift=1.15)
         self._dit: SingleStreamDiT | None = None
+        self._dit_lock = threading.Lock()
         self._vae: WanVAE | None = None
         self._text_encoder = None
 
     # --- lazy loaders ----------------------------------------------------------
     @property
     def dit(self) -> SingleStreamDiT:
-        if self._dit is None:
-            self._dit = loaders.load_dit(
+        if self._dit is not None:
+            return self._dit
+        with self._dit_lock:
+            if self._dit is not None:
+                return self._dit
+            dit = loaders.load_dit(
                 self.config.unet_name, self.device, self.dtype, self.config.model_root
             )
             for lora_name, strength in self.config.loras:
@@ -54,11 +60,17 @@ class Krea2Pipeline:
                 path = loaders.require_model(
                     "loras", lora_name, self.config.model_root, f"LoRA {lora_name!r}"
                 )
-                apply_lora(self._dit, load_lora_file(path), strength)
+                apply_lora(
+                    dit,
+                    load_lora_file(path),
+                    strength,
+                    lora_name=lora_name,
+                )
             # After the LoRA is merged the weights are static, so the blocks can
             # be compiled once and reused by every layer, step and tile size.
-            accel.compile_repeated_blocks(self._dit.blocks)
-        return self._dit
+            accel.compile_repeated_blocks(dit.blocks)
+            self._dit = dit
+            return dit
 
     @property
     def vae(self) -> WanVAE:

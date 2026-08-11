@@ -125,6 +125,17 @@ class WorkflowConfig:
             return [(name, strength) for name, strength in self.loras if strength]
         return [(self.lora_name, self.lora_strength)] if self.lora_strength else []
 
+    def resolve_seedvr2(self) -> SeedVR2Config:
+        model_dir = self.seedvr2.model_dir or os.path.join(
+            self.model_root, "SEEDVR2"
+        )
+        return replace(
+            self.seedvr2,
+            model_dir=model_dir,
+            device=self.device,
+            dtype=str(self.dtype).removeprefix("torch."),
+        )
+
 
 @dataclass
 class WorkflowResult:
@@ -209,22 +220,24 @@ def _stage(timings: dict[str, float], name: str, cfg: WorkflowConfig,
 
 
 def _prefetch(fn: Callable[[], object]) -> Callable[[], None]:
-    """Start ``fn`` on a worker thread and return a callable that waits for it.
+    """Run ``fn`` on a worker and return a waiter that re-raises its failure."""
+    failure: list[BaseException] = []
 
-    Failures are swallowed: the caller always touches the same lazy property
-    afterwards, so a broken prefetch just falls back to loading inline (and
-    raises there, with a meaningful traceback).
-    """
     def run() -> None:
         try:
             fn()
-        except Exception:  # pragma: no cover - retried synchronously
-            logger.debug("prefetch failed, falling back to inline loading",
-                         exc_info=True)
+        except BaseException as exc:
+            failure.append(exc)
 
     thread = threading.Thread(target=run, name="krea2-prefetch", daemon=True)
     thread.start()
-    return thread.join
+
+    def wait() -> None:
+        thread.join()
+        if failure:
+            raise failure[0]
+
+    return wait
 
 
 #: Loaded models are kept for the lifetime of the process, so a second
@@ -376,12 +389,7 @@ def run_workflow(config: WorkflowConfig | None = None,
         with _stage(timings, "seedvr2", cfg, width, height):
             from .seedvr2 import seedvr2_upscale
 
-            seedvr2_cfg = cfg.seedvr2
-            if seedvr2_cfg.model_dir is None:
-                seedvr2_cfg = replace(
-                    seedvr2_cfg, model_dir=os.path.join(cfg.model_root, "SEEDVR2")
-                )
-            seed_out = seedvr2_upscale(matched, seedvr2_cfg)
+            seed_out = seedvr2_upscale(matched, cfg.resolve_seedvr2())
         stages["seedvr2"] = seed_out
     else:
         say("[5/6] SeedVR2 skipped")

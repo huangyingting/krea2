@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -117,7 +118,10 @@ class SeedVR2Upscaler:
     def __init__(self, cfg: SeedVR2Config | None = None):
         self.cfg = cfg or SeedVR2Config()
         self.model_dir = self.cfg.model_dir or default_model_dir()
+        self.device = get_device(self.cfg.device)
+        self.dtype = getattr(torch, self.cfg.dtype)
         self.runner: VideoDiffusionInfer | None = None
+        self._request_lock = threading.RLock()
 
     # --- setup -------------------------------------------------------------
     def load(self) -> VideoDiffusionInfer:
@@ -134,9 +138,9 @@ class SeedVR2Upscaler:
         config.diffusion.cfg.rescale = cfg.cfg_rescale
         config.diffusion.timesteps.sampling.steps = cfg.sample_steps
 
-        runner = VideoDiffusionInfer(config)
+        runner = VideoDiffusionInfer(config, device=self.device)
         runner.configure_dit_model(
-            device=cfg.device, checkpoint=_resolve(cfg.dit_model, self.model_dir)
+            checkpoint=_resolve(cfg.dit_model, self.model_dir)
         )
         runner.configure_vae_model()
         if hasattr(runner.vae, "set_memory_limit"):
@@ -149,18 +153,21 @@ class SeedVR2Upscaler:
         return runner
 
     def unload(self) -> None:
-        self.runner = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        with self._request_lock:
+            self.runner = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # --- inference ---------------------------------------------------------
     def _text_embeds(self) -> dict[str, list[Tensor]]:
         pos_path, neg_path = resolve_embeddings(self.cfg)
-        device = get_device()
-        dtype = getattr(torch, self.cfg.dtype)
-        pos = torch.load(pos_path, weights_only=True, map_location="cpu").to(device, dtype)
-        neg = torch.load(neg_path, weights_only=True, map_location="cpu").to(device, dtype)
+        pos = torch.load(pos_path, weights_only=True, map_location="cpu").to(
+            self.device, self.dtype
+        )
+        neg = torch.load(neg_path, weights_only=True, map_location="cpu").to(
+            self.device, self.dtype
+        )
         return {"texts_pos": [pos], "texts_neg": [neg]}
 
     @staticmethod
@@ -177,7 +184,7 @@ class SeedVR2Upscaler:
                          independent: bool = False) -> list[Tensor]:
         runner = self.runner
         assert runner is not None
-        device = get_device()
+        device = self.device
         noises = []
         aug_noises = []
         for latent in cond_latents:
@@ -203,7 +210,11 @@ class SeedVR2Upscaler:
             for key, value in text_embeds.items()
         }
 
-        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16, enabled=True):
+        with torch.no_grad(), torch.autocast(
+            device.type,
+            self.dtype,
+            enabled=device.type == "cuda" and self.dtype != torch.float32,
+        ):
             if independent and len(cond_latents) > 1:
                 # Preserve batch_size=1 DiT numerics, then group same-shaped VAE
                 # decodes. Variable-length attention across multiple images is
@@ -236,9 +247,21 @@ class SeedVR2Upscaler:
 
     @torch.no_grad()
     def _upscale_videos(self, images: list[Tensor], independent: bool) -> list[Tensor]:
+        with self._request_lock:
+            runner = self.load()
+            try:
+                return self._upscale_videos_unlocked(images, independent, runner)
+            finally:
+                runner.clear_vae_temporal_caches()
+
+    def _upscale_videos_unlocked(
+        self,
+        images: list[Tensor],
+        independent: bool,
+        runner: VideoDiffusionInfer,
+    ) -> list[Tensor]:
         cfg = self.cfg
-        runner = self.load()
-        device = get_device()
+        device = self.device
         set_seed(cfg.seed, same_across_ranks=True)
 
         video_transform = Compose([
@@ -268,7 +291,6 @@ class SeedVR2Upscaler:
         cond_latents = runner.vae_encode(cond_latents)
         if not cfg.keep_dit_resident:
             runner.vae.to("cpu")
-            runner.dit.to(device)
 
         samples = self._generation_step(
             cond_latents, self._text_embeds(), independent=independent
@@ -310,13 +332,15 @@ class SeedVR2Upscaler:
 
 #: The 7B DiT takes ~7 s to load, so keep one upscaler for the whole process.
 _CACHED: dict[tuple, SeedVR2Upscaler] = {}
+_CACHE_LOCK = threading.RLock()
 
 
 def release_upscaler() -> None:
     """Drop the cached upscaler and free its VRAM."""
-    for upscaler in _CACHED.values():
-        upscaler.unload()
-    _CACHED.clear()
+    with _CACHE_LOCK:
+        for upscaler in _CACHED.values():
+            upscaler.unload()
+        _CACHED.clear()
 
 
 def seedvr2_upscale(image: Tensor, cfg: SeedVR2Config | None = None, **overrides) -> Tensor:
@@ -331,9 +355,10 @@ def seedvr2_upscale(image: Tensor, cfg: SeedVR2Config | None = None, **overrides
     key = (cfg.dit_model, cfg.vae_model, cfg.variant, cfg.model_dir, cfg.device,
            cfg.dtype, cfg.cfg_scale, cfg.cfg_rescale, cfg.sample_steps,
            cfg.vae_tile, cfg.vae_tile_overlap)
-    upscaler = _CACHED.get(key)
-    if upscaler is None:
-        release_upscaler()
-        upscaler = _CACHED.setdefault(key, SeedVR2Upscaler(cfg))
-    upscaler.cfg = cfg          # seed / resolution / colour correction may change
-    return upscaler.upscale_images(image)
+    with _CACHE_LOCK:
+        upscaler = _CACHED.get(key)
+        if upscaler is None:
+            release_upscaler()
+            upscaler = _CACHED.setdefault(key, SeedVR2Upscaler(cfg))
+        upscaler.cfg = cfg
+        return upscaler.upscale_images(image)

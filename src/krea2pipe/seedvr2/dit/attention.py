@@ -24,6 +24,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+SDPA_VARLEN_MAX_GROUP_BYTES = 256 * 1024**2
+SDPA_VARLEN_MAX_GROUP_SEQUENCES = 64
+
 
 def _sdpa(q: Tensor, k: Tensor, v: Tensor, softmax_scale=None, causal=False) -> Tensor:
     """(b, s, h, d) -> (b, s, h, d)."""
@@ -70,15 +73,27 @@ def sdpa_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None,
     for i, (lq, lk) in enumerate(zip(lens_q_cpu.tolist(), lens_k_cpu.tolist())):
         groups.setdefault((lq, lk), []).append(i)
 
-    outputs: list = [None] * n
+    output = torch.empty_like(q)
+    q_offsets = cu_seqlens_q.detach().cpu().tolist()
     for idx in groups.values():
-        qb = torch.stack([q_splits[i] for i in idx])
-        kb = torch.stack([k_splits[i] for i in idx])
-        vb = torch.stack([v_splits[i] for i in idx])
-        ob = _sdpa(qb, kb, vb, softmax_scale, causal)
-        for j, i in enumerate(idx):
-            outputs[i] = ob[j]
-    return torch.cat(outputs, dim=0)
+        lq = q_splits[idx[0]].shape[0]
+        lk = k_splits[idx[0]].shape[0]
+        per_sequence_bytes = (
+            2 * lq * q[0].numel() * q.element_size()
+            + lk * k[0].numel() * k.element_size()
+            + lk * v[0].numel() * v.element_size()
+        )
+        chunk_size = max(1, SDPA_VARLEN_MAX_GROUP_BYTES // per_sequence_bytes)
+        chunk_size = min(chunk_size, SDPA_VARLEN_MAX_GROUP_SEQUENCES)
+        for start in range(0, len(idx), chunk_size):
+            chunk = idx[start:start + chunk_size]
+            qb = torch.stack([q_splits[i] for i in chunk])
+            kb = torch.stack([k_splits[i] for i in chunk])
+            vb = torch.stack([v_splits[i] for i in chunk])
+            ob = _sdpa(qb, kb, vb, softmax_scale, causal)
+            for j, i in enumerate(chunk):
+                output[q_offsets[i]:q_offsets[i + 1]].copy_(ob[j])
+    return output
 
 
 class TorchAttention(nn.Module):

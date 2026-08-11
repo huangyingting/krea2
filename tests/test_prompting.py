@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import torch
 
+from krea2pipe.models import text_encoder as text_encoder_module
 from krea2pipe.models.text_encoder import Krea2TextEncoder
 
 
@@ -44,6 +46,57 @@ class _CausalTextModel(torch.nn.Module):
         )
         self.calls += 1
         return SimpleNamespace(last_hidden_state=hidden, past_key_values=object())
+
+
+def test_text_encoder_restores_requested_dtype_after_assign_loading(monkeypatch):
+    class FakeRotary(torch.nn.Module):
+        def __init__(self, _config):
+            super().__init__()
+            self.register_buffer(
+                "inv_freq",
+                torch.ones(1),
+                persistent=False,
+            )
+
+    class FakeTextModel(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1))
+            self.rotary_emb = FakeRotary(config)
+
+    class FakeConfig:
+        def __init__(self, **_kwargs):
+            self.text_config = SimpleNamespace()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            Qwen3VLConfig=FakeConfig,
+            Qwen3VLTextModel=FakeTextModel,
+        ),
+    )
+    monkeypatch.setattr(
+        text_encoder_module.Qwen2Tokenizer,
+        "from_pretrained",
+        lambda _path: _Tokenizer(),
+    )
+    monkeypatch.setattr(
+        text_encoder_module,
+        "load_file",
+        lambda _path: {
+            "model.language_model.weight": torch.ones(1, dtype=torch.float64),
+        },
+    )
+
+    encoder = Krea2TextEncoder(
+        "checkpoint.safetensors",
+        device="cpu",
+        dtype=torch.float16,
+    )
+
+    assert encoder.model.weight.dtype == torch.float16
+    assert encoder.model.rotary_emb.inv_freq.dtype == torch.float32
 
 
 def test_qwen_expands_theme_with_official_system_prompt():

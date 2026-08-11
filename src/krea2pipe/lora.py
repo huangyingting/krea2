@@ -29,8 +29,13 @@ def apply_lora(
     lora: dict[str, torch.Tensor],
     strength: float,
     key_prefix: str = "diffusion_model.",
+    *,
+    lora_name: str | None = None,
 ) -> int:
-    """Merge a LoRA into ``model`` in-place.  Returns the number of patched weights."""
+    """Merge a LoRA in-place and return the number of patched weights.
+
+    An enabled LoRA must patch at least one model weight.
+    """
     if strength == 0:
         return 0
 
@@ -70,5 +75,11 @@ def apply_lora(
 
     if unmatched:
         logger.warning("LoRA: %d keys did not match the model (e.g. %s)", len(unmatched), unmatched[:3])
+    if patched == 0:
+        name = f" {lora_name!r}" if lora_name is not None else ""
+        raise ValueError(
+            f"Enabled LoRA{name} patched zero model weights; "
+            "verify that it is compatible with the configured DiT"
+        )
     logger.info("LoRA: merged %d weights at strength %.3f", patched, strength)
     return patched

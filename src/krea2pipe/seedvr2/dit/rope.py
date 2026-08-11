@@ -45,6 +45,10 @@ class RotaryEmbeddingBase(nn.Module):
     def get_axial_freqs(self, *dims):
         return self.rope.get_axial_freqs(*dims)
 
+    def _apply(self, fn, recurse=True):
+        self.get_axial_freqs.cache_clear()
+        return super()._apply(fn, recurse=recurse)
+
 
 class RotaryEmbedding3d(RotaryEmbeddingBase):
     def __init__(self, dim: int):

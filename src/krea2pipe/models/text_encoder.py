@@ -112,6 +112,7 @@ class Krea2TextEncoder(torch.nn.Module):
         missing = [m for m in missing if "rotary_emb.inv_freq" not in m]
         if missing or unexpected:
             raise RuntimeError(f"text encoder weight mismatch: missing={missing[:5]} unexpected={unexpected[:5]}")
+        model = model.to(dtype=dtype)
         del sd, text_sd
 
         # Non-persistent buffers (rope inv_freq) stay on the meta device after `assign=True`.

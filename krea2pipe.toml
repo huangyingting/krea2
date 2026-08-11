@@ -27,6 +27,8 @@
 
 # --- Input mode ---
 # Only the block selected by prompt-mode is validated and used.
+# Source entries include paths; entries beginning with ! exclude paths and never re-
+# include them.
 # Source mode stores its queue in output-dir/.krea2pipe-source.sqlite3 using WAL
 # synchronous=NORMAL.
 # Use `krea2pipe --config FILE --reset-status` to clear completion state without
@@ -35,27 +37,20 @@
 # Select the active source or theme block; CLI --prompt ignores both
 prompt-mode = "source"
 
-# SOURCE MODE: mix any number of explicit prompt files and recursive folders; relative
-# paths resolve from the process working directory
-# sources = ["/data/krea2/prompts", "/data/krea2/more-prompts.txt"]
+# SOURCE MODE: Git-style glob list where normal entries include and leading ! entries
+# exclude; supports *, **, ?, and character classes; regex is not supported; concrete
+# folders recursively include .txt, .text, .prompt, and .prompts files; concrete files
+# are included regardless of extension; relative entries resolve from the process
+# working directory
+# sources = [
+#   "/data/krea2/prompts/**/*.txt",
+#   "/data/krea2/special.prompts",
+#   "!/data/krea2/prompts/archive/**",
+#   "!/data/krea2/prompts/**/draft-?.txt",
+# ]
 # SOURCE MODE ONLY: filesystem events ingest new files immediately; this full metadata
 # scan recovers missed events, and 0 consumes current files then exits
 # reconcile-interval = 300
-# SOURCE MODE ONLY: Gitignore-style patterns relative to each source folder; later !
-# patterns re-include matching paths
-source-ignore = []
-# SOURCE MODE ONLY: optional regular expression matched against each relative path;
-# setting it also permits nonstandard file extensions
-# source-file-regex = ".*\\.(txt|prompt)$"
-# SOURCE MODE ONLY: optional regular expression that each non-comment prompt line must
-# match
-# source-prompt-regex = "portrait|landscape"
-# SOURCE MODE ONLY: inclusive filesystem mtime lower bound in ISO-8601; timestamps
-# without an offset are interpreted as UTC
-# source-modified-after = "2026-01-01T00:00:00Z"
-# SOURCE MODE ONLY: exclusive filesystem mtime upper bound in ISO-8601; timestamps
-# without an offset are interpreted as UTC
-# source-modified-before = "2027-01-01T00:00:00Z"
 
 # THEME MODE: subject and requirements that resident Qwen expands into image prompts
 # theme = "A visual theme for Qwen to expand into varied prompts"

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from . import blend, color_match, loaders, sampling
+from . import blend, color_match, loaders, nodes, sampling
 
 if TYPE_CHECKING:
     from .workflow import WorkflowConfig
@@ -326,12 +326,22 @@ def prepare_output(cfg: WorkflowConfig) -> None:
             pass
     except OSError as exc:
         raise OSError(f"cannot write to output-dir {path}: {exc}") from exc
-    filename_dir = os.path.split(cfg.filename)[0]
-    target = (path.resolve() / cfg.subdir / filename_dir).resolve()
+    width, height = cfg.resolve_size()
+    target, _basename = nodes.resolve_output_target(
+        str(path),
+        cfg.filename,
+        cfg.subdir,
+        cfg.time_format,
+        0,
+        width,
+        height,
+    )
     try:
-        target.relative_to(path.resolve())
-    except ValueError as exc:
-        raise ValueError(f"output subdirectory escapes output-dir: {target}") from exc
+        target.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target):
+            pass
+    except OSError as exc:
+        raise OSError(f"cannot write to output destination {target}: {exc}") from exc
 
 
 def preflight(cfg: WorkflowConfig) -> None:

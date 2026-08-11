@@ -23,6 +23,7 @@ dit:
     norm_eps: 1.0e-05
     ada: single
     qk_bias: False
+    qk_rope: True
     qk_norm: fusedrms
     patch_size: [ 1,2,2 ]
     num_layers: 32 # llm-like

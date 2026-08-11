@@ -144,20 +144,10 @@ def build_config_parser() -> argparse.ArgumentParser:
     g.add_argument("--prompt-mode", default="source",
                    help="Select source or theme mode; ignored by CLI --prompt")
     g.add_argument("--sources", default=None, metavar="PATHS",
-                   help="SOURCE MODE: array of prompt files and folders")
+                   help="SOURCE MODE: Git-style include and !exclude glob list")
     g.add_argument("--reconcile-interval", default=None, metavar="SECONDS",
                    help="SOURCE MODE ONLY: full-scan safety interval; omitted uses 300 "
                         "seconds, while 0 processes the current queue and exits")
-    g.add_argument("--source-ignore", default=[],
-                   help="SOURCE MODE ONLY: Git-style ignore patterns; ! re-includes")
-    g.add_argument("--source-file-regex", default=None,
-                   help="SOURCE MODE ONLY: regular expression matched against relative paths")
-    g.add_argument("--source-prompt-regex", default=None,
-                   help="SOURCE MODE ONLY: regular expression required in prompt text")
-    g.add_argument("--source-modified-after", default=None,
-                   help="SOURCE MODE ONLY: include files at or after this ISO-8601 time")
-    g.add_argument("--source-modified-before", default=None,
-                   help="SOURCE MODE ONLY: include files before this ISO-8601 time")
     g.add_argument("--theme", default=None,
                    help="THEME MODE: use resident Qwen to expand this theme into prompts")
     g.add_argument("--theme-system-prompt", default=EXPANSION_SYSTEM_PROMPT,
@@ -375,6 +365,7 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
         max_resolution=args.seedvr2_max_resolution,
         color_correction=args.seedvr2_color_correction,
         device=args.device,
+        dtype=dtype_name,
     )
     cfg = WorkflowConfig(
         prompt=args.prompt,
@@ -507,19 +498,18 @@ def _render_pending(
 
 def _run_source_queue(
     cfg: WorkflowConfig,
-    sources: list[str],
+    source_spec: batch.SourceSpec,
     reconcile_interval: float,
-    source_filter: batch.SourceFilter,
 ) -> int:
     """Run an event-driven source queue with periodic full reconciliation."""
-    with batch.SourceQueue(sources, cfg.output_dir, source_filter) as queue:
+    with batch.SourceQueue(source_spec, cfg.output_dir) as queue:
         if reconcile_interval == 0:
             queue.reconcile()
             _render_pending(cfg, queue, announce_empty=True)
             return 0
 
         try:
-            with batch.SourceWatcher(sources) as watcher:
+            with batch.SourceWatcher(source_spec) as watcher:
                 queue.reconcile()
                 last_reconcile = time.monotonic()
                 announce = True
@@ -547,12 +537,34 @@ def _run_source_queue(
                 exc,
                 reconcile_interval,
             )
-            announce = True
-            while True:
-                queue.reconcile()
-                _render_pending(cfg, queue, announce_empty=announce)
-                announce = False
-                time.sleep(reconcile_interval)
+            _run_reconciliation_fallback(cfg, queue, reconcile_interval)
+
+
+def _run_reconciliation_fallback(
+    cfg: WorkflowConfig,
+    queue: batch.SourceQueue,
+    reconcile_interval: float,
+) -> None:
+    """Keep reconciliation periodic when filesystem events are unavailable."""
+    queue.reconcile()
+    last_reconcile = time.monotonic()
+    announce = True
+    while True:
+        rendered = _render_pending(
+            cfg,
+            queue,
+            announce_empty=announce,
+            max_prompts=1,
+        )
+        announce = False
+        now = time.monotonic()
+        if now - last_reconcile >= reconcile_interval:
+            queue.reconcile()
+            last_reconcile = time.monotonic()
+        elif not rendered:
+            time.sleep(reconcile_interval - (now - last_reconcile))
+            queue.reconcile()
+            last_reconcile = time.monotonic()
 
 
 def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
@@ -693,16 +705,10 @@ def _resolve_input_mode(args: argparse.Namespace) -> str:
     return mode
 
 
-def _source_filter(args: argparse.Namespace) -> batch.SourceFilter:
+def _source_spec(args: argparse.Namespace) -> batch.SourceSpec:
     try:
-        return batch.SourceFilter(
-            file_regex=args.source_file_regex,
-            prompt_regex=args.source_prompt_regex,
-            modified_after=args.source_modified_after,
-            modified_before=args.source_modified_before,
-            ignore=args.source_ignore,
-        )
-    except ValueError as exc:
+        return batch.SourceSpec(args.sources)
+    except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 
 
@@ -710,14 +716,12 @@ def _reset_status(
     cfg: WorkflowConfig,
     mode: str,
     args: argparse.Namespace,
-    source_filter: batch.SourceFilter | None,
+    source_spec: batch.SourceSpec | None,
 ) -> int:
     if mode == "source":
-        with batch.SourceQueue(
-            args.sources,
-            cfg.output_dir,
-            source_filter,
-        ) as queue:
+        if source_spec is None:
+            raise RuntimeError("source mode requires a resolved source specification")
+        with batch.SourceQueue(source_spec, cfg.output_dir) as queue:
             queue.reconcile()
             reset = queue.reset()
     else:
@@ -750,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     _configure_logging(args.log_level, args.verbose, args.log_file)
     mode = _resolve_input_mode(args)
-    source_filter = _source_filter(args) if mode == "source" else None
+    source_spec = _source_spec(args) if mode == "source" else None
     cfg = config_from_args(args)
     if not args.reset_status and mode == "source" and not cfg.save:
         raise SystemExit("batch mode requires saving so completed lines can be resumed safely")
@@ -772,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
                 cfg.output_dir if cfg.save else "(saving disabled)",
             )
             if args.reset_status:
-                return _reset_status(cfg, mode, args, source_filter)
+                return _reset_status(cfg, mode, args, source_spec)
             if mode == "prompt":
                 _render(cfg)
                 return 0
@@ -780,11 +784,12 @@ def main(argv: list[str] | None = None) -> int:
                 _render_theme(cfg, args.theme, args.prompt_count)
                 return 0
 
+            if source_spec is None:
+                raise RuntimeError("source mode requires a resolved source specification")
             return _run_source_queue(
                 cfg,
-                args.sources,
+                source_spec,
                 args.reconcile_interval,
-                source_filter,
             )
     except KeyboardInterrupt:
         logger.warning("interrupted; the active prompt remains pending for the next run")

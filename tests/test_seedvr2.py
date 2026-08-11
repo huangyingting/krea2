@@ -7,9 +7,14 @@ resolution-limit behavior.
 from __future__ import annotations
 
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
+from omegaconf import OmegaConf
+from torch import nn
 
 from krea2pipe.seedvr2 import SeedVR2Config, color_fix
 from krea2pipe.seedvr2.dit.attention import sdpa_varlen_func
@@ -73,6 +78,32 @@ def test_sdpa_varlen_fast_path_equals_general_path():
     equal = torch.tensor([0, 4, 8], dtype=torch.int32)
     assert torch.allclose(sdpa_varlen_func(q, k, v, equal, equal),
                           _naive_varlen(q, k, v, equal, equal), atol=1e-9)
+
+
+def test_sdpa_varlen_chunks_large_unequal_groups(monkeypatch):
+    import krea2pipe.seedvr2.dit.attention as attention
+
+    torch.manual_seed(0)
+    lens_q = [3, 3, 3, 3, 4]
+    lens_k = [5, 5, 5, 5, 2]
+    q = torch.randn(sum(lens_q), 2, 4, dtype=torch.float64)
+    k = torch.randn(sum(lens_k), 2, 4, dtype=torch.float64)
+    v = torch.randn_like(k)
+    cu_q = torch.tensor([0] + list(torch.tensor(lens_q).cumsum(0)), dtype=torch.int32)
+    cu_k = torch.tensor([0] + list(torch.tensor(lens_k).cumsum(0)), dtype=torch.int32)
+    calls = []
+    original_sdpa = attention._sdpa
+
+    def recording_sdpa(q_batch, *args, **kwargs):
+        calls.append(q_batch.shape[0])
+        return original_sdpa(q_batch, *args, **kwargs)
+
+    monkeypatch.setattr(attention, "_sdpa", recording_sdpa)
+    monkeypatch.setattr(attention, "SDPA_VARLEN_MAX_GROUP_BYTES", 2048)
+    out = attention.sdpa_varlen_func(q, k, v, cu_q, cu_k)
+
+    assert max(calls) == 2
+    assert torch.allclose(out, _naive_varlen(q, k, v, cu_q, cu_k), atol=1e-9)
 
 
 # --- colour correction ----------------------------------------------------------------
@@ -174,6 +205,25 @@ def test_na_resize_caps_the_long_edge():
     assert (w, h) == (512, 1024)       # aspect ratio preserved
 
 
+def test_side_resize_applies_the_final_capped_size_once(monkeypatch):
+    import krea2pipe.seedvr2.transforms.side_resize as side_resize
+
+    calls = []
+    original_resize = side_resize.TVF.resize
+
+    def recording_resize(image, size, interpolation):
+        calls.append(tuple(size))
+        return original_resize(image, size, interpolation)
+
+    monkeypatch.setattr(side_resize.TVF, "resize", recording_resize)
+    out = side_resize.SideResize(size=1024, max_size=1024)(
+        torch.rand(1, 3, 512, 256)
+    )
+
+    assert out.shape[-2:] == (1024, 512)
+    assert calls == [(1024, 512)]
+
+
 def test_na_resize_square_input_hits_the_target():
     assert _resize(torch.rand(1, 3, 2496, 2496), 4096, 4096) == (4096, 4096)
 
@@ -203,6 +253,314 @@ def test_seedvr2_config_defaults_match_the_workflow():
 
 def test_seedvr2_config_path_for_3b():
     assert SeedVR2Config(variant="3b").config_path().name == "main_3b.yaml"
+
+
+def test_seedvr2_3b_config_instantiates_on_meta():
+    from krea2pipe.seedvr2.config import create_object, load_config
+
+    cfg = load_config(str(SeedVR2Config(variant="3b").config_path()))
+    with torch.device("meta"):
+        model = create_object(cfg.dit.model)
+
+    assert cfg.dit.model.qk_rope is True
+    assert len(model.blocks) == 32
+
+
+def test_workflow_device_and_dtype_override_seedvr2_defaults():
+    from krea2pipe.workflow import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        model_root="/models",
+        device="cpu",
+        dtype=torch.float32,
+        seedvr2=SeedVR2Config(device="cuda:7", dtype="float16"),
+    )
+
+    resolved = cfg.resolve_seedvr2()
+    assert resolved.device == "cpu"
+    assert resolved.dtype == "float32"
+    assert resolved.model_dir == "/models/SEEDVR2"
+
+
+def test_cli_propagates_device_and_dtype_into_seedvr2():
+    from krea2pipe import cli
+
+    args = cli.build_config_parser().parse_args([
+        "--device", "cpu", "--dtype", "float32",
+    ])
+    args.prompt = "test"
+    cfg = cli.config_from_args(args)
+
+    assert cfg.seedvr2.device == "cpu"
+    assert cfg.seedvr2.dtype == "float32"
+
+
+def test_seedvr2_device_resolver_preserves_cuda_index():
+    from krea2pipe.seedvr2.parallel import get_device
+
+    assert get_device("cuda:3") == torch.device("cuda:3")
+
+
+def test_dit_assign_loading_finishes_on_the_configured_device_and_dtype(monkeypatch):
+    import krea2pipe.seedvr2.infer as infer
+
+    class TinyDit(nn.Linear):
+        def set_gradient_checkpointing(self, enabled):
+            self.gradient_checkpointing = enabled
+
+    config = OmegaConf.create({
+        "dit": {
+            "dtype": "float32",
+            "gradient_checkpoint": False,
+            "model": {"unused": True},
+        },
+    })
+    requested = []
+
+    monkeypatch.setattr(infer, "create_object", lambda config: TinyDit(2, 2))
+
+    def load_state(path, dtype=None, device="cpu"):
+        requested.append((dtype, device))
+        return {
+            "weight": torch.ones(2, 2, dtype=torch.float64),
+            "bias": torch.ones(2, dtype=torch.float64),
+        }
+
+    monkeypatch.setattr(infer, "load_checkpoint_state", load_state)
+    runner = infer.VideoDiffusionInfer(config, device="cpu")
+    runner.configure_dit_model(checkpoint="dit.safetensors")
+
+    assert requested == [(torch.float32, "cpu")]
+    assert next(runner.dit.parameters()).device.type == "cpu"
+    assert next(runner.dit.parameters()).dtype == torch.float32
+
+
+@pytest.mark.parametrize("has_unexpected_key", [False, True])
+def test_vae_checkpoint_loading_rejects_key_mismatches(
+    monkeypatch, has_unexpected_key
+):
+    import krea2pipe.seedvr2.infer as infer
+
+    config = OmegaConf.create({
+        "vae": {
+            "dtype": "float32",
+            "checkpoint": "vae.safetensors",
+            "model": {"unused": True},
+        },
+    })
+    monkeypatch.setattr(infer, "create_object", lambda config: nn.Linear(2, 2))
+    state = {
+        "weight": torch.ones(2, 2),
+        "bias": torch.ones(2),
+    }
+    if has_unexpected_key:
+        state["extra"] = torch.ones(1)
+    else:
+        state.pop("bias")
+    monkeypatch.setattr(
+        infer,
+        "load_checkpoint_state",
+        lambda *args, **kwargs: state,
+    )
+
+    runner = infer.VideoDiffusionInfer(config, device="cpu")
+    with pytest.raises(RuntimeError, match="checkpoint mismatch"):
+        runner.configure_vae_model()
+
+
+def test_rope_cache_is_cleared_when_the_module_moves():
+    from krea2pipe.seedvr2.dit.rope import RotaryEmbeddingBase
+
+    rope = RotaryEmbeddingBase(dim=12, rope_dim=3)
+    rope.get_axial_freqs.cache_clear()
+    rope.get_axial_freqs(1, 2, 2)
+    assert rope.get_axial_freqs.cache_info().currsize == 1
+
+    rope.to(dtype=torch.float64)
+    assert rope.get_axial_freqs.cache_info().currsize == 0
+
+
+def test_dit_forward_reuses_and_discards_request_cache():
+    from krea2pipe.seedvr2.dit.nadit import NaDiT
+
+    counter = 0
+    values = []
+    caches = []
+
+    class PatchIn(nn.Module):
+        def forward(self, hidden, shape):
+            return hidden, shape
+
+    class PatchOut(nn.Module):
+        def forward(self, hidden, shape, cache):
+            caches.append(cache.cache)
+            return hidden, shape
+
+    class Embedding(nn.Module):
+        def forward(self, timestep, device, dtype):
+            return torch.zeros(1, 1, device=device, dtype=dtype)
+
+    class Block(nn.Module):
+        def forward(self, vid, txt, vid_shape, txt_shape, emb, cache):
+            nonlocal counter
+
+            def build():
+                nonlocal counter
+                counter += 1
+                return counter
+
+            values.append(cache("indices", build))
+            return vid, txt, vid_shape, txt_shape
+
+    model = NaDiT.__new__(NaDiT)
+    nn.Module.__init__(model)
+    model.need_txt_repeat = False
+    model.gradient_checkpointing = False
+    model.txt_in = nn.Identity()
+    model.vid_in = PatchIn()
+    model.emb_in = Embedding()
+    model.blocks = nn.ModuleList([Block(), Block()])
+    model.vid_out = PatchOut()
+
+    args = {
+        "vid": torch.zeros(1, 2),
+        "txt": torch.zeros(1, 2),
+        "vid_shape": torch.tensor([[1, 1, 1]]),
+        "txt_shape": torch.tensor([[1]]),
+        "timestep": torch.tensor([1.0]),
+    }
+    model(**args)
+    model(**args)
+
+    assert values == [1, 1, 2, 2]
+    assert caches[0] is not caches[1]
+    assert caches == [{}, {}]
+
+
+def test_dit_offload_does_not_reload_until_the_next_sampling_request():
+    import krea2pipe.seedvr2.infer as infer
+
+    class FakeDit(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.moves = []
+
+        def to(self, device, *args, **kwargs):
+            self.moves.append(str(torch.device(device)))
+            return self
+
+    class FakeSampler:
+        timesteps = [1]
+
+        def sample(self, x, f):
+            return x
+
+    config = OmegaConf.create({
+        "diffusion": {"cfg": {"scale": 1.0, "rescale": 0.0, "partial": 1.0}},
+    })
+    runner = infer.VideoDiffusionInfer(config, device="cuda:3")
+    runner.dit = FakeDit()
+    runner.sampler = FakeSampler()
+    latent = torch.zeros(1, 1, 1, 2)
+    text = torch.zeros(1, 2)
+
+    runner.inference_latents(
+        noises=[latent],
+        conditions=[latent],
+        texts_pos=[text],
+        texts_neg=[text],
+        dit_offload=True,
+    )
+
+    assert runner.dit.moves == ["cuda:3", "cpu"]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_upscale_request_always_clears_vae_temporal_caches(monkeypatch, fails):
+    import krea2pipe.seedvr2.runner as runner
+
+    class FakeRunner:
+        def __init__(self):
+            self.clears = 0
+
+        def clear_vae_temporal_caches(self):
+            self.clears += 1
+
+    fake = FakeRunner()
+    upscaler = runner.SeedVR2Upscaler(
+        SeedVR2Config(device="cpu", dtype="float32")
+    )
+    monkeypatch.setattr(upscaler, "load", lambda: fake)
+
+    if fails:
+        def run(*args):
+            raise RuntimeError("failed request")
+    else:
+        def run(*args):
+            return ["done"]
+
+    monkeypatch.setattr(upscaler, "_upscale_videos_unlocked", run)
+    if fails:
+        with pytest.raises(RuntimeError, match="failed request"):
+            upscaler._upscale_videos([], independent=False)
+    else:
+        assert upscaler._upscale_videos([], independent=False) == ["done"]
+    assert fake.clears == 1
+
+
+def test_cached_upscaler_serializes_shared_requests(monkeypatch):
+    import krea2pipe.seedvr2.runner as runner
+
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class FakeUpscaler:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def upscale_images(self, image):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            seed = self.cfg.seed
+            time.sleep(0.02)
+            with state_lock:
+                active -= 1
+            return image + seed
+
+        def unload(self):
+            pass
+
+    runner.release_upscaler()
+    monkeypatch.setattr(runner, "SeedVR2Upscaler", FakeUpscaler)
+    image = torch.zeros(1, 1, 1, 1)
+    configs = [
+        SeedVR2Config(device="cpu", dtype="float32", seed=1),
+        SeedVR2Config(device="cpu", dtype="float32", seed=2),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outputs = list(pool.map(lambda cfg: runner.seedvr2_upscale(image, cfg), configs))
+    runner.release_upscaler()
+
+    assert [out.item() for out in outputs] == [1.0, 2.0]
+    assert max_active == 1
+
+
+def test_clear_vae_temporal_caches_drops_retained_tensors():
+    from krea2pipe.seedvr2.infer import VideoDiffusionInfer
+    from krea2pipe.seedvr2.vae.causal_inflation_lib import InflatedCausalConv3d
+
+    conv = InflatedCausalConv3d(
+        1, 1, kernel_size=1, inflation_mode="none"
+    )
+    conv.memory = torch.ones(1)
+    runner = VideoDiffusionInfer(OmegaConf.create({}), device="cpu")
+    runner.vae = nn.Sequential(conv)
+
+    runner.clear_vae_temporal_caches()
+    assert conv.memory is None
 
 
 # --- spatial VAE tiling -----------------------------------------------------------------

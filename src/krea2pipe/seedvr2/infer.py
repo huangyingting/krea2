@@ -59,8 +59,9 @@ def load_checkpoint_state(path: str, dtype=None, device="cpu"):
 
 
 class VideoDiffusionInfer():
-    def __init__(self, config: DictConfig):
+    def __init__(self, config: DictConfig, device: str | torch.device | None = None):
         self.config = config
+        self.device = get_device(device)
         #: ``((tile_h, tile_w), (overlap_h, overlap_w))`` for spatial VAE tiling
         #: ``None`` keeps whole-frame behaviour.
         self.vae_tiling: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None
@@ -99,7 +100,11 @@ class VideoDiffusionInfer():
 
     @log_on_entry
     @log_runtime
-    def configure_dit_model(self, device="cpu", checkpoint=None):
+    def configure_dit_model(self, device=None, checkpoint=None):
+        if device is not None:
+            self.device = get_device(device)
+        dtype = getattr(torch, self.config.dit.get("dtype", "bfloat16"))
+
         # Load dit checkpoint.
         # For fast init & resume,
         #   when training from scratch, rank0 init DiT on cpu, then sync to other ranks with FSDP.
@@ -115,18 +120,17 @@ class VideoDiffusionInfer():
         self.dit.set_gradient_checkpointing(self.config.dit.gradient_checkpoint)
 
         if checkpoint:
-            dtype = getattr(torch, self.config.dit.get("dtype", "bfloat16"))
             # Load straight onto the target device when possible: the weights are
             # ~16 GB, so staging them through host memory costs seconds.
-            load_device = str(get_device()) if device in [get_device(), "cuda"] else "cpu"
-            state = load_checkpoint_state(checkpoint, dtype=dtype, device=load_device)
+            state = load_checkpoint_state(
+                checkpoint, dtype=dtype, device=str(self.device)
+            )
             loading_info = self.dit.load_state_dict(state, strict=True, assign=True)
             get_logger(__name__).info("loaded SeedVR2 DiT weights from %s (%s)",
                                       checkpoint, loading_info)
             self.dit = meta_non_persistent_buffer_init_fn(self.dit)
 
-        if device in [get_device(), "cuda"]:
-            self.dit.to(get_device())
+        self.dit.to(device=self.device, dtype=dtype)
 
         # Print model size.
         num_params = sum(p.numel() for p in self.dit.parameters())
@@ -139,29 +143,60 @@ class VideoDiffusionInfer():
         dtype = getattr(torch, self.config.vae.dtype)
         self.vae = create_object(self.config.vae.model)
         self.vae.requires_grad_(False).eval()
-        self.vae.to(device=get_device(), dtype=dtype)
+        self.vae.to(device=self.device, dtype=dtype)
 
         # Load vae checkpoint.
         state = load_checkpoint_state(
-            self.config.vae.checkpoint, dtype=dtype, device=str(get_device())
+            self.config.vae.checkpoint, dtype=dtype, device=str(self.device)
         )
-        self.vae.load_state_dict(state)
+        convert_deprecated_attention_blocks = getattr(
+            self.vae, "_convert_deprecated_attention_blocks", None
+        )
+        if callable(convert_deprecated_attention_blocks):
+            convert_deprecated_attention_blocks(state)
+        expected_keys = set(self.vae.state_dict())
+        checkpoint_keys = set(state)
+        missing = sorted(expected_keys - checkpoint_keys)
+        unexpected = sorted(checkpoint_keys - expected_keys)
+        if missing or unexpected:
+            raise RuntimeError(
+                "SeedVR2 VAE checkpoint mismatch: "
+                f"missing={missing[:5]} unexpected={unexpected[:5]}"
+            )
+        loading_info = self.vae.load_state_dict(state, strict=True)
+        get_logger(__name__).info(
+            "loaded SeedVR2 VAE weights from %s (%s)",
+            self.config.vae.checkpoint,
+            loading_info,
+        )
 
         # Set causal slicing.
         if hasattr(self.vae, "set_causal_slicing") and hasattr(self.config.vae, "slicing"):
             self.vae.set_causal_slicing(**self.config.vae.slicing)
+
+    def clear_vae_temporal_caches(self) -> None:
+        from krea2pipe.seedvr2.vae.causal_inflation_lib import (
+            InflatedCausalConv3d as SlicedCausalConv3d,
+        )
+        from krea2pipe.seedvr2.vae.inflated_layers import (
+            InflatedCausalConv3d as CausalConv3d,
+        )
+
+        for module in self.vae.modules():
+            if isinstance(module, (SlicedCausalConv3d, CausalConv3d)):
+                module.memory = None
 
     # ------------------------------ Diffusion ------------------------------ #
 
     def configure_diffusion(self):
         self.schedule = create_schedule_from_config(
             config=self.config.diffusion.schedule,
-            device=get_device(),
+            device=self.device,
         )
         self.sampling_timesteps = create_sampling_timesteps_from_config(
             config=self.config.diffusion.timesteps.sampling,
             schedule=self.schedule,
-            device=get_device(),
+            device=self.device,
         )
         self.sampler = create_sampler_from_config(
             config=self.config.diffusion.sampler,
@@ -176,7 +211,7 @@ class VideoDiffusionInfer():
         use_sample = self.config.vae.get("use_sample", True)
         latents = []
         if len(samples) > 0:
-            device = get_device()
+            device = self.device
             dtype = getattr(torch, self.config.vae.dtype)
             scale = self.config.vae.scaling_factor
             shift = self.config.vae.get("shifting_factor", 0.0)
@@ -201,7 +236,7 @@ class VideoDiffusionInfer():
                     sample = self.vae.preprocess(sample)
                 # Preserve float32 encoder inputs for the highest-accuracy VAE path.
                 vae_dtype = next(self.vae.parameters()).dtype
-                with torch.autocast(device.type, sample.dtype,
+                with torch.autocast(device.type, vae_dtype,
                                     enabled=vae_dtype != sample.dtype):
                     if use_sample:
                         latent = self.vae.encode(sample, **tiling).latent
@@ -225,7 +260,7 @@ class VideoDiffusionInfer():
     def vae_decode(self, latents: List[Tensor]) -> List[Tensor]:
         samples = []
         if len(latents) > 0:
-            device = get_device()
+            device = self.device
             dtype = getattr(torch, self.config.vae.dtype)
             scale = self.config.vae.scaling_factor
             shift = self.config.vae.get("shifting_factor", 0.0)
@@ -340,48 +375,46 @@ class VideoDiffusionInfer():
         latents_cond, _ = na.flatten(conditions)
 
         # Enter eval mode.
+        self.dit.to(self.device)
         was_training = self.dit.training
         self.dit.eval()
 
         # Sampling.
-        latents = self.sampler.sample(
-            x=latents,
-            f=lambda args: classifier_free_guidance_dispatcher(
-                pos=lambda: self.dit(
-                    vid=torch.cat([args.x_t, latents_cond], dim=-1),
-                    txt=text_pos_embeds,
-                    vid_shape=latents_shapes,
-                    txt_shape=text_pos_shapes,
-                    timestep=args.t.repeat(batch_size),
-                ).vid_sample,
-                neg=lambda: self.dit(
-                    vid=torch.cat([args.x_t, latents_cond], dim=-1),
-                    txt=text_neg_embeds,
-                    vid_shape=latents_shapes,
-                    txt_shape=text_neg_shapes,
-                    timestep=args.t.repeat(batch_size),
-                ).vid_sample,
-                scale=(
-                    cfg_scale
-                    if (args.i + 1) / len(self.sampler.timesteps)
-                    <= self.config.diffusion.cfg.get("partial", 1)
-                    else 1.0
+        try:
+            latents = self.sampler.sample(
+                x=latents,
+                f=lambda args: classifier_free_guidance_dispatcher(
+                    pos=lambda: self.dit(
+                        vid=torch.cat([args.x_t, latents_cond], dim=-1),
+                        txt=text_pos_embeds,
+                        vid_shape=latents_shapes,
+                        txt_shape=text_pos_shapes,
+                        timestep=args.t.repeat(batch_size),
+                    ).vid_sample,
+                    neg=lambda: self.dit(
+                        vid=torch.cat([args.x_t, latents_cond], dim=-1),
+                        txt=text_neg_embeds,
+                        vid_shape=latents_shapes,
+                        txt_shape=text_neg_shapes,
+                        timestep=args.t.repeat(batch_size),
+                    ).vid_sample,
+                    scale=(
+                        cfg_scale
+                        if (args.i + 1) / len(self.sampler.timesteps)
+                        <= self.config.diffusion.cfg.get("partial", 1)
+                        else 1.0
+                    ),
+                    rescale=self.config.diffusion.cfg.rescale,
                 ),
-                rescale=self.config.diffusion.cfg.rescale,
-            ),
-        )
-
-        # Exit eval mode.
-        self.dit.train(was_training)
+            )
+        finally:
+            self.dit.train(was_training)
+            if dit_offload:
+                self.dit.to("cpu")
 
         # Unflatten.
         latents = na.unflatten(latents, latents_shapes)
 
-        if dit_offload:
-            self.dit.to("cpu")
-
-        if dit_offload:
-            self.dit.to(get_device())
         return latents
 
     @torch.no_grad()
@@ -398,5 +431,5 @@ class VideoDiffusionInfer():
             noises, conditions, texts_pos, texts_neg,
             cfg_scale=cfg_scale, dit_offload=dit_offload,
         )
-        self.vae.to(get_device())
+        self.vae.to(self.device)
         return self.vae_decode(latents)

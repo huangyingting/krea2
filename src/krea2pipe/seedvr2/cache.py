@@ -45,3 +45,6 @@ class Cache:
     def get(self, key: str):
         key = self.prefix + key
         return self.cache[key]
+
+    def clear(self) -> None:
+        self.cache.clear()

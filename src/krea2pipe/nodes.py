@@ -127,6 +127,37 @@ def _sanitize(name: str) -> str:
     return "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
 
 
+def resolve_output_target(
+    output_dir: str,
+    filename: str,
+    subdir: str,
+    time_format: str,
+    counter: int,
+    width: int,
+    height: int,
+) -> tuple[Path, str]:
+    """Resolve and validate the destination directory and base filename."""
+    now = datetime.now()
+    name = filename
+    name = name.replace("%date", now.strftime("%Y-%m-%d"))
+    name = name.replace("%time", now.strftime(time_format))
+    name = name.replace("%counter", str(counter))
+    name = name.replace("%width", str(width))
+    name = name.replace("%height", str(height))
+    directory, basename = os.path.split(name)
+    basename = _sanitize(basename) or "image"
+
+    output_root = Path(output_dir).expanduser().resolve()
+    target_dir = (output_root / subdir / directory).resolve()
+    try:
+        target_dir.relative_to(output_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"output subdirectory escapes output-dir: {target_dir}"
+        ) from exc
+    return target_dir, basename
+
+
 def save_image(
     image: Tensor,
     output_dir: str,
@@ -142,23 +173,15 @@ def save_image(
     image_stage: str = "final",
 ) -> list[str]:
     """Save a BHWC image batch with portable parameters and generation metadata."""
-    name = filename
-    name = name.replace("%date", datetime.now().strftime("%Y-%m-%d"))
-    name = name.replace("%time", datetime.now().strftime(time_format))
-    name = name.replace("%counter", str(counter))
-    name = name.replace("%width", str(image.shape[2]))
-    name = name.replace("%height", str(image.shape[1]))
-    directory, basename = os.path.split(name)
-    basename = _sanitize(basename) or "image"
-
-    output_root = Path(output_dir).expanduser().resolve()
-    target_dir = (output_root / subdir / directory).resolve()
-    try:
-        target_dir.relative_to(output_root)
-    except ValueError as exc:
-        raise ValueError(
-            f"output subdirectory escapes output-dir: {target_dir}"
-        ) from exc
+    target_dir, basename = resolve_output_target(
+        output_dir,
+        filename,
+        subdir,
+        time_format,
+        counter,
+        image.shape[2],
+        image.shape[1],
+    )
     target_dir.mkdir(parents=True, exist_ok=True)
 
     paths = []

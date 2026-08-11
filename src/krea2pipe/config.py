@@ -2,10 +2,10 @@
 
 A config file is a flat mapping of generation and queue settings, e.g.::
 
-    sources = ["/data/prompts", "/data/more-prompts.txt"]
+    sources = ["/data/prompts/**/*.txt", "!/data/prompts/archive/**"]
     output-dir = "/data/renders"
     steps = 8
-    reconcile-interval = 300 # safety scan every five minutes
+    reconcile-interval = 300 # Safety scan every five minutes
 
 TOML is read with the standard library.  The public CLI only selects this file
 or supplies a one-time prompt.
@@ -32,14 +32,15 @@ __all__ = [
 _TEMPLATE_SKIP = {"help", "config", "generate_config"}
 _TEMPLATE_HIDE = {"lora_name", "lora_strength"}
 _PLACEHOLDERS: dict[str, Any] = {
-    "sources": ["/data/krea2/prompts", "/data/krea2/more-prompts.txt"],
+    "sources": [
+        "/data/krea2/prompts/**/*.txt",
+        "/data/krea2/special.prompts",
+        "!/data/krea2/prompts/archive/**",
+        "!/data/krea2/prompts/**/draft-?.txt",
+    ],
     "theme": "A visual theme for Qwen to expand into varied prompts",
     "prompt_count": 0,
     "reconcile_interval": 300,
-    "source_file_regex": r".*\.(txt|prompt)$",
-    "source_prompt_regex": "portrait|landscape",
-    "source_modified_after": "2026-01-01T00:00:00Z",
-    "source_modified_before": "2027-01-01T00:00:00Z",
     "width": 1248,
     "height": 1248,
     "log_file": "/data/krea2/logs/krea2pipe.log",
@@ -51,13 +52,8 @@ _TEMPLATE_DEFAULTS: dict[str, Any] = {
 }
 _HELP_OVERRIDES = {
     "prompt_mode": "Select the active source or theme block; CLI --prompt ignores both",
-    "sources": "SOURCE MODE: mix any number of explicit prompt files and recursive folders; relative paths resolve from the process working directory",
+    "sources": "SOURCE MODE: Git-style glob list where normal entries include and leading ! entries exclude; supports *, **, ?, and character classes; regex is not supported; concrete folders recursively include .txt, .text, .prompt, and .prompts files; concrete files are included regardless of extension; relative entries resolve from the process working directory",
     "reconcile_interval": "SOURCE MODE ONLY: filesystem events ingest new files immediately; this full metadata scan recovers missed events, and 0 consumes current files then exits",
-    "source_ignore": "SOURCE MODE ONLY: Gitignore-style patterns relative to each source folder; later ! patterns re-include matching paths",
-    "source_file_regex": "SOURCE MODE ONLY: optional regular expression matched against each relative path; setting it also permits nonstandard file extensions",
-    "source_prompt_regex": "SOURCE MODE ONLY: optional regular expression that each non-comment prompt line must match",
-    "source_modified_after": "SOURCE MODE ONLY: inclusive filesystem mtime lower bound in ISO-8601; timestamps without an offset are interpreted as UTC",
-    "source_modified_before": "SOURCE MODE ONLY: exclusive filesystem mtime upper bound in ISO-8601; timestamps without an offset are interpreted as UTC",
     "theme": "THEME MODE: subject and requirements that resident Qwen expands into image prompts",
     "theme_system_prompt": "THEME MODE ONLY: editable Qwen expansion instructions; the generated value is Krea 2's official system prompt",
     "prompt_count": "THEME MODE ONLY: total expansion count; omitted or 0 continues until interrupted, while a positive value is resumable and finite",
@@ -78,6 +74,7 @@ _HELP_OVERRIDES = {
 _GROUP_INTROS = {
     "input mode": (
         "Only the block selected by prompt-mode is validated and used.",
+        "Source entries include paths; entries beginning with ! exclude paths and never re-include them.",
         "Source mode stores its queue in output-dir/.krea2pipe-source.sqlite3 using WAL synchronous=NORMAL.",
         "Use `krea2pipe --config FILE --reset-status` to clear completion state without deleting images.",
     ),
@@ -219,7 +216,15 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
             if value is None:
                 placeholder = _PLACEHOLDERS.get(action.dest)
                 if placeholder is not None:
-                    lines.append(f"# {key} = {_toml_value(placeholder)}")
+                    if action.dest == "sources":
+                        lines.append(f"# {key} = [")
+                        lines.extend(
+                            f"#   {_toml_value(item)},"
+                            for item in placeholder
+                        )
+                        lines.append("# ]")
+                    else:
+                        lines.append(f"# {key} = {_toml_value(placeholder)}")
                 continue
             lines.append(f"{key} = {_toml_value(value)}")
     return "\n".join(lines) + "\n"

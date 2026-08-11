@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 import torch
@@ -55,6 +56,31 @@ def test_preflight_rejects_output_path_escape_before_inference(tmp_path):
     cfg.subdir = "../outside"
     with pytest.raises(ValueError, match="escapes output-dir"):
         validation.preflight(cfg)
+
+
+def test_preflight_creates_and_probes_the_resolved_output_destination(
+    tmp_path, monkeypatch
+):
+    cfg = _minimal_model_root(tmp_path / "models")
+    cfg.save = True
+    cfg.output_dir = str(tmp_path / "output")
+    cfg.subdir = "renders"
+    cfg.filename = "daily/%width/image"
+    probed = []
+    original = validation.tempfile.NamedTemporaryFile
+
+    def record_probe(*args, **kwargs):
+        probed.append(Path(kwargs["dir"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(validation.tempfile, "NamedTemporaryFile", record_probe)
+
+    validation.preflight(cfg)
+
+    width, _height = cfg.resolve_size()
+    destination = tmp_path / "output" / "renders" / "daily" / str(width)
+    assert destination.is_dir()
+    assert probed[-1] == destination
 
 
 @pytest.mark.parametrize(

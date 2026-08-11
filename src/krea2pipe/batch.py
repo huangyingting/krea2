@@ -8,15 +8,14 @@ events without rereading unchanged prompt files.
 from __future__ import annotations
 
 import fcntl
+import glob
 import json
 import os
-import re
 import sqlite3
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from hashlib import blake2b
 from pathlib import Path
 from typing import Iterator
@@ -43,7 +42,7 @@ __all__ = [
     "Progress",
     "Prompt",
     "SourceQueue",
-    "SourceFilter",
+    "SourceSpec",
     "SourceWatchError",
     "SourceWatcher",
     "ThemeProgress",
@@ -179,110 +178,182 @@ class _FileChangedDuringIndex(RuntimeError):
 
 
 @dataclass(frozen=True)
-class SourceFilter:
-    """File, prompt-text, and modification-time filters for a source queue."""
+class _SourcePattern:
+    root: Path
+    pattern: PathSpec
+    explicit_file: Path | None = None
+    default_extensions: bool = False
 
-    file_regex: str | None = None
-    prompt_regex: str | None = None
-    modified_after: str | None = None
-    modified_before: str | None = None
-    ignore: tuple[str, ...] = ()
-    _ignore_spec: PathSpec = field(init=False, repr=False, compare=False)
-    _file_pattern: re.Pattern | None = field(init=False, repr=False, compare=False)
-    _prompt_pattern: re.Pattern | None = field(init=False, repr=False, compare=False)
-    _after_ns: int | None = field(init=False, repr=False, compare=False)
-    _before_ns: int | None = field(init=False, repr=False, compare=False)
+    def matches(self, file: Path) -> bool:
+        if not file.is_relative_to(self.root):
+            return False
+        if self.explicit_file is not None:
+            return file == self.explicit_file
+        if self.default_extensions and file.suffix.lower() not in PROMPT_SUFFIXES:
+            return False
+        return self.pattern.match_file(file.relative_to(self.root).as_posix())
 
-    def __post_init__(self) -> None:
-        for value, name in (
-            (self.file_regex, "source-file-regex"),
-            (self.prompt_regex, "source-prompt-regex"),
-        ):
-            if value is not None:
-                if not isinstance(value, str) or not value:
-                    raise ValueError(f"{name} must be a non-empty string")
-                try:
-                    re.compile(value)
-                except re.error as exc:
-                    raise ValueError(f"{name}: invalid regular expression: {exc}") from exc
-        after = self._parse_timestamp(self.modified_after, "source-modified-after")
-        before = self._parse_timestamp(self.modified_before, "source-modified-before")
-        if after is not None and before is not None and after >= before:
+
+class SourceSpec:
+    """One ordered source list with glob includes and leading-! exclusions."""
+
+    def __init__(
+        self,
+        sources: (
+            str
+            | os.PathLike
+            | list[str | os.PathLike]
+            | tuple[str | os.PathLike, ...]
+        ),
+    ):
+        raw_values = (
+            [sources]
+            if isinstance(sources, (str, os.PathLike))
+            else list(sources)
+        )
+        try:
+            values = [os.fspath(value) for value in raw_values]
+        except TypeError as exc:
             raise ValueError(
-                "source-modified-after must be earlier than source-modified-before"
-            )
-        if not isinstance(self.ignore, (list, tuple)) or any(
-            not isinstance(pattern, str) or not pattern
-            for pattern in self.ignore
+                "sources must contain non-empty path or glob strings"
+            ) from exc
+        if not values or any(
+            not isinstance(value, str) or not value.strip() for value in values
         ):
-            raise ValueError("source-ignore must be an array of non-empty patterns")
-        object.__setattr__(self, "ignore", tuple(self.ignore))
-        object.__setattr__(
-            self,
-            "_file_pattern",
-            re.compile(self.file_regex) if self.file_regex is not None else None,
+            raise ValueError("sources must contain non-empty path or glob strings")
+        self.entries = tuple(value.strip() for value in values)
+        positives = [value for value in self.entries if not value.startswith("!")]
+        if not positives:
+            raise ValueError("sources must contain at least one positive entry")
+        self.includes = tuple(self._include_pattern(value) for value in positives)
+        self.absolute_excludes: list[_SourcePattern | Path] = []
+        for value in self.entries:
+            if value.startswith("!"):
+                self._add_exclusion(value[1:])
+        self.scan_roots = self._collapse_roots(
+            pattern.root
+            for pattern in self.includes
+            if pattern.explicit_file is None
         )
-        object.__setattr__(
-            self,
-            "_prompt_pattern",
-            re.compile(self.prompt_regex) if self.prompt_regex is not None else None,
+        self.explicit_files = tuple(
+            pattern.explicit_file
+            for pattern in self.includes
+            if pattern.explicit_file is not None
         )
-        object.__setattr__(self, "_after_ns", after)
-        object.__setattr__(self, "_before_ns", before)
-        object.__setattr__(
-            self,
-            "_ignore_spec",
-            PathSpec.from_lines("gitignore", self.ignore),
+        self.watch_roots = self._collapse_roots(
+            list(self.scan_roots)
+            + [file.parent for file in self.explicit_files]
         )
 
     @staticmethod
-    def _parse_timestamp(value: str | None, option: str) -> int | None:
-        if value is None:
-            return None
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{option} must be an ISO-8601 timestamp")
-        normalized = value.strip()
-        if normalized.endswith("Z"):
-            normalized = normalized[:-1] + "+00:00"
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError as exc:
-            raise ValueError(f"{option} must be an ISO-8601 timestamp") from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return int(parsed.timestamp() * 1_000_000_000)
+    def _absolute(value: str) -> str:
+        expanded = os.path.expanduser(value)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(os.getcwd(), expanded)
+        return os.path.normpath(expanded)
 
-    @property
-    def identity(self) -> dict[str, str | None]:
-        return {
-            "file_regex": self.file_regex,
-            "prompt_regex": self.prompt_regex,
-            "modified_after": self.modified_after,
-            "modified_before": self.modified_before,
-            "ignore": list(self.ignore),
-        }
+    @staticmethod
+    def _collapse_roots(paths) -> tuple[Path, ...]:
+        roots: list[Path] = []
+        for path in sorted(set(paths), key=lambda item: (len(item.parts), str(item))):
+            if not any(path == root or path.is_relative_to(root) for root in roots):
+                roots.append(path)
+        return tuple(roots)
 
-    def matches_file(
-        self,
-        file: Path,
-        source: Path,
-        stat: os.stat_result,
-    ) -> bool:
-        if self._file_pattern is not None:
-            relative = file.name if source.is_file() else file.relative_to(source).as_posix()
-            if self._file_pattern.search(relative) is None:
+    @staticmethod
+    def _split_glob(value: str, *, require_root: bool = True) -> tuple[Path, str]:
+        absolute = SourceSpec._absolute(value)
+        parts = Path(absolute).parts
+        prefix: list[str] = []
+        pattern: list[str] = []
+        found_magic = False
+        for part in parts:
+            if not found_magic and not glob.has_magic(part):
+                prefix.append(part)
+            else:
+                found_magic = True
+                pattern.append(part)
+        root = Path(*prefix).resolve()
+        if require_root and not root.is_dir():
+            raise FileNotFoundError(
+                f"source glob root not found or not a directory: {root}"
+            )
+        return root, "/".join(pattern)
+
+    @staticmethod
+    def _pathspec(pattern: str) -> PathSpec:
+        return PathSpec.from_lines("gitignore", [f"/{pattern.lstrip('/')}"])
+
+    def _include_pattern(self, value: str) -> _SourcePattern:
+        absolute = self._absolute(value)
+        if not glob.has_magic(absolute):
+            path = Path(absolute).resolve()
+            if not path.exists():
+                raise FileNotFoundError(path)
+            if path.is_file():
+                return _SourcePattern(
+                    path.parent,
+                    self._pathspec(path.name),
+                    explicit_file=path,
+                )
+            return _SourcePattern(
+                path,
+                self._pathspec("**"),
+                default_extensions=True,
+            )
+        root, pattern = self._split_glob(value)
+        return _SourcePattern(root, self._pathspec(pattern))
+
+    def _add_exclusion(self, value: str) -> None:
+        if not value:
+            raise ValueError("sources exclusion after ! must not be empty")
+        absolute = self._absolute(value)
+        if not glob.has_magic(absolute):
+            self.absolute_excludes.append(Path(absolute).resolve())
+            return
+        root, pattern = self._split_glob(value, require_root=False)
+        self.absolute_excludes.append(_SourcePattern(root, self._pathspec(pattern)))
+
+    def includes_file(self, file: Path) -> bool:
+        file = file.expanduser().resolve()
+        matching = [pattern for pattern in self.includes if pattern.matches(file)]
+        if not matching:
+            return False
+        for exclusion in self.absolute_excludes:
+            if isinstance(exclusion, Path):
+                if file == exclusion or file.is_relative_to(exclusion):
+                    return False
+            elif exclusion.matches(file):
                 return False
-        relative = file.name if source.is_file() else file.relative_to(source).as_posix()
-        if self._ignore_spec.match_file(relative):
-            return False
-        if self._after_ns is not None and stat.st_mtime_ns < self._after_ns:
-            return False
-        if self._before_ns is not None and stat.st_mtime_ns >= self._before_ns:
-            return False
         return True
 
-    def matches_prompt(self, text: str) -> bool:
-        return self._prompt_pattern is None or self._prompt_pattern.search(text) is not None
+    def iter_files(self) -> Iterator[Path]:
+        explicit = set(self.explicit_files)
+        for file in self.explicit_files:
+            if file.is_file() and self.includes_file(file):
+                yield file
+        for root in self.scan_roots:
+            for file in root.rglob("*"):
+                if file not in explicit and file.is_file() and self.includes_file(file):
+                    yield file
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for value in self.entries:
+            excluded = value.startswith("!")
+            path = value.removeprefix("!")
+            absolute = self._absolute(path)
+            if glob.has_magic(absolute):
+                root, pattern = self._split_glob(
+                    path,
+                    require_root=not excluded,
+                )
+                canonical = str(root / pattern)
+            else:
+                canonical = str(Path(absolute).resolve())
+            normalized.append(("!" if excluded else "") + canonical)
+        return tuple(normalized)
 
 
 class SourceQueue:
@@ -303,25 +374,12 @@ class SourceQueue:
 
     def __init__(
         self,
-        sources: str | os.PathLike | list[str] | tuple[str, ...],
+        sources: SourceSpec | str | os.PathLike | list[str] | tuple[str, ...],
         output_dir: str | os.PathLike,
-        source_filter: SourceFilter | None = None,
     ):
-        values = [sources] if isinstance(sources, (str, os.PathLike)) else list(sources)
-        if not values:
-            raise ValueError("sources must contain at least one file or directory")
-        self.sources = tuple(dict.fromkeys(
-            Path(value).expanduser().resolve() for value in values
-        ))
-        for source in self.sources:
-            if not source.exists():
-                raise FileNotFoundError(source)
-        self.filter = source_filter or SourceFilter()
+        self.spec = sources if isinstance(sources, SourceSpec) else SourceSpec(sources)
         identity = json.dumps(
-            {
-                "sources": sorted(str(source) for source in self.sources),
-                "filter": self.filter.identity,
-            },
+            {"sources": self.spec.identity},
             sort_keys=True,
             ensure_ascii=False,
         )
@@ -426,9 +484,7 @@ class SourceQueue:
             (self.source_id, path),
         ).fetchone()
 
-    def _prompt_row(self, prompt: Prompt) -> PromptRow | None:
-        if not self.filter.matches_prompt(prompt.text):
-            return None
+    def _prompt_row(self, prompt: Prompt) -> PromptRow:
         return (
             self.source_id,
             prompt.key,
@@ -592,20 +648,11 @@ class SourceQueue:
         file = file.expanduser().resolve()
         if not file.is_file():
             return False
-        source = self._root_for(file)
-        if source is None:
-            return False
-        if (
-            source.is_dir()
-            and self.filter.file_regex is None
-            and file.suffix.lower() not in PROMPT_SUFFIXES
-        ):
-            return False
+        if not self.spec.includes_file(file):
+            return bool(self._remove_path(file))
         file_string = str(file)
         for _attempt in range(2):
             before = file.stat()
-            if not self.filter.matches_file(file, source, before):
-                return bool(self._remove_path(file))
             stored = self._stored_file(file_string)
             if (
                 stored is not None
@@ -660,16 +707,8 @@ class SourceQueue:
         """Discover files and index only new, appended, or changed content."""
         scan = time.time_ns()
         changed = 0
-        for source in self.sources:
-            if source.is_dir():
-                for file in source.rglob("*"):
-                    if file.is_file() and (
-                        self.filter.file_regex is not None
-                        or file.suffix.lower() in PROMPT_SUFFIXES
-                    ):
-                        changed += int(self.index_file(file, scan))
-            else:
-                changed += int(self.index_file(source, scan))
+        for file in self.spec.iter_files():
+            changed += int(self.index_file(file, scan))
         stale = self._db.execute(
             "SELECT path FROM source_files "
             "WHERE source_id = ? AND seen_scan != ?",
@@ -679,32 +718,21 @@ class SourceQueue:
             changed += self._remove_path(Path(row["path"]))
         return changed
 
-    def _root_for(self, path: Path) -> Path | None:
-        matching = [
-            source
-            for source in self.sources
-            if path == source or (source.is_dir() and path.is_relative_to(source))
-        ]
-        if not matching:
-            return None
-        return max(matching, key=lambda item: len(item.parts))
-
     def update_paths(self, paths: set[Path]) -> int:
         """Apply filesystem changes without walking the full source tree."""
         changed = 0
         for path in sorted({item.expanduser().resolve() for item in paths}):
-            if self._root_for(path) is None and not any(
-                source.is_dir() and source.is_relative_to(path)
-                for source in self.sources
+            if not any(
+                path == root
+                or path.is_relative_to(root)
+                or root.is_relative_to(path)
+                for root in self.spec.watch_roots
             ):
                 continue
 
             if path.is_dir():
                 for file in path.rglob("*"):
-                    if file.is_file() and (
-                        self.filter.file_regex is not None
-                        or file.suffix.lower() in PROMPT_SUFFIXES
-                    ):
+                    if file.is_file() and self.spec.includes_file(file):
                         changed += int(self.index_file(file))
             elif path.is_file():
                 changed += int(self.index_file(path))
@@ -773,14 +801,10 @@ class SourceWatcher:
 
     def __init__(
         self,
-        sources: str | os.PathLike | list[str] | tuple[str, ...],
+        sources: SourceSpec | str | os.PathLike | list[str] | tuple[str, ...],
     ):
-        values = [sources] if isinstance(sources, (str, os.PathLike)) else list(sources)
-        source_paths = [Path(value).expanduser().resolve() for value in values]
-        self.paths = tuple(sorted({
-            path if path.is_dir() else path.parent
-            for path in source_paths
-        }))
+        self.spec = sources if isinstance(sources, SourceSpec) else SourceSpec(sources)
+        self.paths = self.spec.watch_roots
         self._condition = threading.Condition()
         self._pending: set[Path] = set()
         self._error: BaseException | None = None

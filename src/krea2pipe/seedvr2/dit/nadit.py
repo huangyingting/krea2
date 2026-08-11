@@ -154,7 +154,7 @@ class NaDiT(nn.Module):
         vid_shape: torch.LongTensor,  # b 3
         txt_shape: torch.LongTensor,  # b 1
         timestep: Union[int, float, torch.IntTensor, torch.FloatTensor],  # b
-        disable_cache: bool = True,  # for test
+        disable_cache: bool = False,
     ):
         # Text input.
         if txt_shape.size(-1) == 1 and self.need_txt_repeat:
@@ -172,20 +172,23 @@ class NaDiT(nn.Module):
 
         # Body
         cache = Cache(disable=disable_cache)
-        for i, block in enumerate(self.blocks):
-            vid, txt, vid_shape, txt_shape = gradient_checkpointing(
-                enabled=(self.gradient_checkpointing and self.training),
-                module=block,
-                vid=vid,
-                txt=txt,
-                vid_shape=vid_shape,
-                txt_shape=txt_shape,
-                emb=emb,
-                cache=cache,
-            )
+        try:
+            for i, block in enumerate(self.blocks):
+                vid, txt, vid_shape, txt_shape = gradient_checkpointing(
+                    enabled=(self.gradient_checkpointing and self.training),
+                    module=block,
+                    vid=vid,
+                    txt=txt,
+                    vid_shape=vid_shape,
+                    txt_shape=txt_shape,
+                    emb=emb,
+                    cache=cache,
+                )
 
-        vid, vid_shape = self.vid_out(vid, vid_shape, cache)
-        return NaDiTOutput(vid_sample=vid)
+            vid, vid_shape = self.vid_out(vid, vid_shape, cache)
+            return NaDiTOutput(vid_sample=vid)
+        finally:
+            cache.clear()
 
 
 class NaDiTUpscaler(nn.Module):
@@ -334,17 +337,20 @@ class NaDiTUpscaler(nn.Module):
 
         # Body
         cache = Cache(disable=disable_cache)
-        for i, block in enumerate(self.blocks):
-            vid, txt, vid_shape, txt_shape = gradient_checkpointing(
-                enabled=(self.gradient_checkpointing and self.training),
-                module=block,
-                vid=vid,
-                txt=txt,
-                vid_shape=vid_shape,
-                txt_shape=txt_shape,
-                emb=emb,
-                cache=cache,
-            )
+        try:
+            for i, block in enumerate(self.blocks):
+                vid, txt, vid_shape, txt_shape = gradient_checkpointing(
+                    enabled=(self.gradient_checkpointing and self.training),
+                    module=block,
+                    vid=vid,
+                    txt=txt,
+                    vid_shape=vid_shape,
+                    txt_shape=txt_shape,
+                    emb=emb,
+                    cache=cache,
+                )
 
-        vid, vid_shape = self.vid_out(vid, vid_shape, cache)
-        return NaDiTOutput(vid_sample=vid)
+            vid, vid_shape = self.vid_out(vid, vid_shape, cache)
+            return NaDiTOutput(vid_sample=vid)
+        finally:
+            cache.clear()

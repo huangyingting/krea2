@@ -176,11 +176,11 @@ def test_apply_lora_honours_alpha():
     assert torch.allclose(linear.weight, before + (up @ down), atol=1e-6)
 
 
-def test_apply_lora_ignores_unknown_keys():
+def test_apply_lora_rejects_unknown_keys():
     model = torch.nn.Module()
     model.layer = torch.nn.Linear(4, 4, bias=False)
-    patched = lora.apply_lora(model, {
-        "diffusion_model.nope.lora_A.weight": torch.randn(2, 4),
-        "diffusion_model.nope.lora_B.weight": torch.randn(4, 2),
-    }, strength=1.0)
-    assert patched == 0
+    with pytest.raises(ValueError, match="patched zero model weights"):
+        lora.apply_lora(model, {
+            "diffusion_model.nope.lora_A.weight": torch.randn(2, 4),
+            "diffusion_model.nope.lora_B.weight": torch.randn(4, 2),
+        }, strength=1.0)

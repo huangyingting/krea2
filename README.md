@@ -267,36 +267,25 @@ settings live in TOML. Configuration switches such as `--source`, `--theme`,
 
 | `prompt-mode` | Used settings | Ignored settings |
 | --- | --- | --- |
-| `"source"` | `sources`, source filters, `reconcile-interval` | Theme settings |
+| `"source"` | `sources`, `reconcile-interval` | Theme settings |
 | `"theme"` | `theme`, `theme-system-prompt`, `prompt-count` | Source settings |
 
 Both blocks may remain configured, making mode changes a one-line edit. CLI
 `--prompt` is the one-time mode and ignores both configured blocks.
 
-For file queue mode, `sources` accepts any mixture of files and directories.
-Each non-empty, non-comment line is one prompt. Directories are recursive, and
-`batch-size` images are generated together for each line:
+For file queue mode, `sources` is one include/exclude list. Each non-empty,
+non-comment line in a selected file is one prompt, and `batch-size` images are
+generated together for each line:
 
 ```toml
 prompt-mode = "source"
 sources = [
-  "/data/krea2/prompts",
+  "/data/krea2/prompts/**/*.txt",
   "/data/krea2/campaign.prompts",
+  "!/data/krea2/prompts/archive/**",
+  "!/data/krea2/prompts/**/draft-?.txt",
 ]
 batch-size = 2
-
-# Gitignore-style paths relative to each source directory.
-source-ignore = [
-  "archive/",
-  "**/draft-*",
-  "!archive/keep.prompts",
-]
-
-# Optional additional filters.
-# source-file-regex = "\\.(txt|prompt|prompts)$"
-# source-prompt-regex = "portrait|landscape"
-# source-modified-after = "2026-01-01T00:00:00Z"
-# source-modified-before = "2027-01-01T00:00:00Z"
 ```
 
 Source mode is an event-driven consumer. Linux filesystem events index newly
@@ -312,12 +301,14 @@ SQLite uses WAL with `synchronous=NORMAL`, so status commits do not fsync every
 image. Process crashes remain transactional; an abrupt power loss may replay a
 recent prompt rather than incorrectly skipping unfinished work.
 
-`source-file-regex` matches paths relative to each source directory;
-`source-prompt-regex` matches prompt text. Modification-time bounds use
-ISO-8601 and compare against filesystem `mtime`: `source-modified-after` is
-inclusive and `source-modified-before` is exclusive. Git-style `!` patterns
-re-include paths. For reliable ingestion, write a temporary file and atomically
-rename it to a supported prompt extension when complete.
+Normal `sources` entries include files and leading-`!` entries exclude them.
+Patterns support Git-style `*`, `**`, `?`, and character classes such as
+`[0-9]`; they are not regular expressions. Concrete folders recursively include
+`.txt`, `.text`, `.prompt`, and `.prompts` files, while concrete files are
+included regardless of extension. Glob entries control their own filename
+matching and can therefore select other extensions. Relative entries resolve
+from the process working directory. For reliable ingestion, write a temporary
+file and atomically rename it to a matched path when complete.
 
 Legacy `source = "PATH"` and `watch = SECONDS` settings remain accepted as
 aliases for a one-item `sources` list and `reconcile-interval`.

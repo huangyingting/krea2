@@ -54,16 +54,8 @@ class SideResize:
         else:
             size = self.size
 
-        resized = TVF.resize(image, size, self.interpolation)
-
-        if self.max_size > 0:
-            if isinstance(resized, torch.Tensor):
-                h, w = resized.shape[-2:]
-            else:
-                w, h = resized.size
-            if max(h, w) > self.max_size:
-                scale = self.max_size / max(h, w)
-                resized = TVF.resize(
-                    resized, (round(h * scale), round(w * scale)), self.interpolation
-                )
-        return resized
+        scale = size / min(height, width)
+        if self.max_size > 0 and max(height, width) * scale > self.max_size:
+            scale = self.max_size / max(height, width)
+            size = (round(height * scale), round(width * scale))
+        return TVF.resize(image, size, self.interpolation)

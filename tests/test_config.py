@@ -86,7 +86,6 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["usdu-seed"] == "random"
     assert generated["seedvr2-seed"] == "random"
     assert generated["prompt-mode"] == "source"
-    assert generated["source-ignore"] == []
     from krea2pipe.prompting import EXPANSION_SYSTEM_PROMPT
 
     assert generated["theme-system-prompt"] == EXPANSION_SYSTEM_PROMPT
@@ -96,16 +95,15 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert "# reconcile-interval = 300" in file.read_text()
     assert "# theme = " in file.read_text()
     assert "# sources = " in file.read_text()
-    assert "# source-file-regex = " in file.read_text()
-    assert "# source-modified-after = " in file.read_text()
+    assert "source-ignore" not in file.read_text()
+    assert "source-file-regex" not in file.read_text()
+    assert "source-modified-after" not in file.read_text()
     assert "\nprompt = " not in file.read_text()
     assert 'prompt-mode = "source"\n\n# SOURCE MODE' in file.read_text()
     assert "\n\n# THEME MODE" in file.read_text()
-    assert (
-        "# SOURCE MODE: mix any number of explicit prompt files and recursive folders;"
-        in file.read_text()
-    )
-    assert "# paths resolve from the process working directory" in file.read_text()
+    documented = file.read_text().replace("\n# ", " ")
+    assert "SOURCE MODE: Git-style glob list where normal entries include" in documented
+    assert "relative entries resolve from the process working directory" in documented
     assert "# increase VRAM usage" in file.read_text()
     from krea2pipe.workflow import WorkflowConfig
 
@@ -180,23 +178,25 @@ def test_toml_accepts_cli_option_aliases(tmp_path):
     assert args.run_usdu is False
 
 
-def test_toml_accepts_multiple_sources_and_filters(tmp_path):
+def test_toml_accepts_unified_source_patterns(tmp_path):
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second.txt"
+    second.write_text("prompt\n")
     file = tmp_path / "krea2pipe.toml"
     file.write_text(
         'prompt-mode = "source"\n'
-        'sources = ["/data/first", "/data/second.txt"]\n'
-        'source-ignore = ["archive/", "draft-*.txt"]\n'
-        'source-file-regex = "\\\\.(txt|prompt)$"\n'
-        'source-prompt-regex = "portrait"\n'
-        'source-modified-after = "2026-01-01T00:00:00Z"\n'
+        f'sources = ["{first}/**/*.txt", "{second}", "!{first}/archive/**"]\n'
     )
     args = parse_args(["--config", str(file)])
 
     assert cli._resolve_input_mode(args) == "source"
-    source_filter = cli._source_filter(args)
-    assert args.sources == ["/data/first", "/data/second.txt"]
-    assert source_filter.ignore == ("archive/", "draft-*.txt")
-    assert source_filter.prompt_regex == "portrait"
+    source_spec = cli._source_spec(args)
+    assert source_spec.entries == (
+        f"{first}/**/*.txt",
+        str(second),
+        f"!{first}/archive/**",
+    )
 
 
 def test_toml_accepts_legacy_source_and_watch_keys(tmp_path):
@@ -223,18 +223,17 @@ def test_toml_rejects_source_alias_with_sources(tmp_path):
         parse_args(["--config", str(file)])
 
 
-def test_source_mode_rejects_invalid_filter(tmp_path):
+def test_source_mode_rejects_source_list_without_an_include(tmp_path):
     file = tmp_path / "krea2pipe.toml"
     file.write_text(
         'prompt-mode = "source"\n'
-        'sources = ["/data/prompts"]\n'
-        'source-file-regex = "["\n'
+        f'sources = ["!{tmp_path}/archive/**"]\n'
     )
     args = parse_args(["--config", str(file)])
     cli._resolve_input_mode(args)
 
-    with pytest.raises(SystemExit, match="invalid regular expression"):
-        cli._source_filter(args)
+    with pytest.raises(SystemExit, match="at least one positive"):
+        cli._source_spec(args)
 
 
 def test_toml_supports_random_seeds(tmp_path, monkeypatch):
@@ -429,9 +428,9 @@ def test_one_shot_prompt_ignores_queue_only_settings(tmp_path, monkeypatch):
             'prompt-mode = "theme"\n'
             'theme = "quiet forest"\n'
             "prompt-count = 1\n"
-            "source = 123\n"
+            "sources = 123\n"
             'reconcile-interval = "ignored"\n'
-            'source-file-regex = "["\n',
+            "",
             "theme",
             "quiet forest",
         ),
@@ -448,10 +447,11 @@ def test_main_routes_configured_input_mode(
     monkeypatch.setattr(
         cli,
         "_run_source_queue",
-        lambda _cfg, source, interval, _source_filter: calls.append(
+        lambda _cfg, source, interval: calls.append(
             ("source", source, interval)
         ) or 0,
     )
+    monkeypatch.setattr(cli, "_source_spec", lambda args: args.sources)
     monkeypatch.setattr(
         cli,
         "_render_theme",
@@ -475,6 +475,37 @@ def test_source_mode_reconciles_periodically_by_default(tmp_path):
         == cli.DEFAULT_SOURCE_RECONCILE_INTERVAL
     )
     assert args.prompt_count is None
+
+
+def test_source_fallback_reconciles_while_backlog_remains(monkeypatch):
+    class StopFallback(Exception):
+        pass
+
+    class Queue:
+        reconciliations = 0
+
+        def reconcile(self):
+            self.reconciliations += 1
+
+    queue = Queue()
+    clock = [0.0]
+    render_calls = []
+
+    def render_pending(_cfg, _queue, *, announce_empty, max_prompts):
+        render_calls.append((announce_empty, max_prompts))
+        if len(render_calls) == 3:
+            raise StopFallback
+        clock[0] += 6
+        return 1
+
+    monkeypatch.setattr(cli, "_render_pending", render_pending)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(StopFallback):
+        cli._run_reconciliation_fallback(SimpleNamespace(), queue, 10)
+
+    assert queue.reconciliations == 2
+    assert render_calls == [(True, 1), (False, 1), (False, 1)]
 
 
 def test_theme_mode_runs_continuously_by_default(tmp_path):
