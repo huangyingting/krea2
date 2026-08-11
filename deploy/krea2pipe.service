@@ -1,11 +1,12 @@
 [Unit]
 Description=Krea2 renderer and local image API
-After=local-fs.target
+After=local-fs.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
 RequiresMountsFor=/data/krea2 /data/ComfyUI/models
 OnFailure=krea2pipe-retry.service
 ConditionPathExists=/data/krea2/krea2pipe.toml
 StartLimitIntervalSec=300
-StartLimitBurst=3
+StartLimitBurst=5
 
 [Service]
 Type=simple
