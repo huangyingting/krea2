@@ -60,6 +60,7 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         ("usdu-mode", cfg.usdu_mode),
         ("color-match-method", cfg.color_match_method),
         ("blend-mode", cfg.blend_mode),
+        ("state-dir", cfg.state_dir),
         ("output-dir", cfg.output_dir),
         ("filename", cfg.filename),
         ("extension", cfg.extension),
@@ -308,24 +309,30 @@ def validate_device(device_name: str) -> None:
         )
 
 
-def prepare_output(cfg: WorkflowConfig) -> None:
-    """Create the output root before expensive inference begins."""
-    if not cfg.save:
-        return
-    path = Path(cfg.output_dir).expanduser()
+def _prepare_writable_directory(value: str, option: str) -> Path:
+    path = Path(value).expanduser()
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise OSError(f"cannot create output-dir {path}: {exc}") from exc
+        raise OSError(f"cannot create {option} {path}: {exc}") from exc
     if not path.is_dir():
-        raise NotADirectoryError(f"output-dir is not a directory: {path}")
+        raise NotADirectoryError(f"{option} is not a directory: {path}")
     if not os.access(path, os.W_OK):
-        raise PermissionError(f"output-dir is not writable: {path}")
+        raise PermissionError(f"{option} is not writable: {path}")
     try:
         with tempfile.NamedTemporaryFile(dir=path):
             pass
     except OSError as exc:
-        raise OSError(f"cannot write to output-dir {path}: {exc}") from exc
+        raise OSError(f"cannot write to {option} {path}: {exc}") from exc
+    return path
+
+
+def prepare_output(cfg: WorkflowConfig) -> None:
+    """Create state and image destinations before expensive inference begins."""
+    if not cfg.save:
+        return
+    _prepare_writable_directory(cfg.state_dir, "state-dir")
+    path = _prepare_writable_directory(cfg.output_dir, "output-dir")
     width, height = cfg.resolve_size()
     target, _basename = nodes.resolve_output_target(
         str(path),

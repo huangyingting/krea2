@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 from hashlib import blake2b
 from pathlib import Path
@@ -34,7 +35,8 @@ SOURCE_QUEUE_NAME = ".krea2pipe-source.sqlite3"
 THEME_PROGRESS_NAME = ".krea2pipe-theme-progress.json"
 
 LOCK_NAME = ".krea2pipe.lock"
-PromptRow = tuple[str, str, str, int, str]
+PromptRow = tuple[bytes, bytes, int, int, int, int, bytes, int]
+EMPTY_CONTENT_HASH = blake2b(b"", digest_size=16).digest()
 
 __all__ = [
     "AlreadyRunningError",
@@ -42,6 +44,7 @@ __all__ = [
     "Progress",
     "Prompt",
     "SourceQueue",
+    "SourceQueueSchemaError",
     "SourceSpec",
     "SourceWatchError",
     "SourceWatcher",
@@ -52,7 +55,7 @@ __all__ = [
 
 
 class AlreadyRunningError(RuntimeError):
-    """Raised when another renderer owns an output directory."""
+    """Raised when another renderer owns a state directory."""
 
 
 class ThemeProgressError(RuntimeError):
@@ -63,11 +66,15 @@ class SourceWatchError(RuntimeError):
     """Raised when filesystem event monitoring stops unexpectedly."""
 
 
+class SourceQueueSchemaError(RuntimeError):
+    """Raised when persisted source state uses an unsupported schema."""
+
+
 class OutputLock:
     """Prevent concurrent renderers from corrupting one resume ledger."""
 
-    def __init__(self, output_dir: str | os.PathLike):
-        self.path = Path(output_dir).expanduser() / LOCK_NAME
+    def __init__(self, state_dir: str | os.PathLike):
+        self.path = Path(state_dir).expanduser() / LOCK_NAME
         self._file = None
 
     def __enter__(self) -> OutputLock:
@@ -79,7 +86,7 @@ class OutputLock:
             self._file.close()
             self._file = None
             raise AlreadyRunningError(
-                f"another krea2pipe process is using output-dir {self.path.parent}"
+                f"another krea2pipe process is using state-dir {self.path.parent}"
             ) from exc
         self._file.seek(0)
         try:
@@ -108,6 +115,7 @@ class Prompt:
     file: Path
     line: int          # 1-based, matching what an editor shows
     text: str
+    durable_id: bytes | None = None
 
     @property
     def key(self) -> str:
@@ -115,9 +123,15 @@ class Prompt:
         return f"{self.file}\t{self.line}\t{content}"
 
     @property
+    def identifier(self) -> bytes:
+        """Compact durable identity, optionally supplied by the source queue."""
+        return self.durable_id or blake2b(self.key.encode(), digest_size=16).digest()
+
+    @property
     def seed_offset(self) -> int:
-        """Stable seed component unique to this file and line."""
-        digest = blake2b(self.key.encode(), digest_size=8).digest()
+        """Stable seed component derived from this prompt's durable identity."""
+        identity = self.durable_id if self.durable_id is not None else self.key.encode()
+        digest = blake2b(identity, digest_size=8).digest()
         return int.from_bytes(digest, "big") & ((1 << 63) - 1)
 
 
@@ -357,25 +371,31 @@ class SourceSpec:
 
 
 class SourceQueue:
-    """Incremental SQLite prompt index for one file or directory source."""
+    """Compact incremental SQLite index backed by immutable source-file ranges."""
 
+    # Bump this for every table or index change so incompatible state is rejected.
+    _SCHEMA_VERSION = 2
     _TAIL_BYTES = 4096
     _INSERT_BATCH = 1000
     _PROMPT_UPSERT = """
         INSERT INTO queue_prompts(
-            source_id, prompt_key, file_path, line_number, text, active
-        ) VALUES (?, ?, ?, ?, ?, 1)
-        ON CONFLICT(source_id, prompt_key) DO UPDATE SET
-            file_path = excluded.file_path,
+            source_id, prompt_id, file_id, line_number,
+            byte_offset, byte_length, text_hash, occurrence, active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(source_id, prompt_id) DO UPDATE SET
+            file_id = excluded.file_id,
             line_number = excluded.line_number,
-            text = excluded.text,
+            byte_offset = excluded.byte_offset,
+            byte_length = excluded.byte_length,
+            text_hash = excluded.text_hash,
+            occurrence = excluded.occurrence,
             active = 1
     """
 
     def __init__(
         self,
         sources: SourceSpec | str | os.PathLike | list[str] | tuple[str, ...],
-        output_dir: str | os.PathLike,
+        state_dir: str | os.PathLike,
     ):
         self.spec = sources if isinstance(sources, SourceSpec) else SourceSpec(sources)
         identity = json.dumps(
@@ -383,19 +403,21 @@ class SourceQueue:
             sort_keys=True,
             ensure_ascii=False,
         )
-        self.source_id = blake2b(
-            identity.encode(), digest_size=16
-        ).hexdigest()
-        output = Path(output_dir).expanduser()
-        output.mkdir(parents=True, exist_ok=True)
-        self.path = output / SOURCE_QUEUE_NAME
+        self.source_id = blake2b(identity.encode(), digest_size=16).digest()
+        state = Path(state_dir).expanduser()
+        state.mkdir(parents=True, exist_ok=True)
+        self.path = state / SOURCE_QUEUE_NAME
         self._db = sqlite3.connect(self.path, timeout=30)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA busy_timeout=30000")
-        self._initialize()
-        self._import_legacy_progress(output / PROGRESS_NAME)
+        self._db.execute("PRAGMA foreign_keys=ON")
+        try:
+            self._initialize()
+        except BaseException:
+            self._db.close()
+            raise
 
     def __enter__(self) -> SourceQueue:
         return self
@@ -407,76 +429,132 @@ class SourceQueue:
         self._db.close()
 
     def _initialize(self) -> None:
-        with self._db:
-            self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS source_queue_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS source_files (
-                    source_id TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    device INTEGER NOT NULL,
-                    inode INTEGER NOT NULL,
-                    size INTEGER NOT NULL,
-                    mtime_ns INTEGER NOT NULL,
-                    line_count INTEGER NOT NULL,
-                    ends_newline INTEGER NOT NULL,
-                    tail_hash TEXT NOT NULL,
-                    seen_scan INTEGER NOT NULL,
-                    PRIMARY KEY (source_id, path)
-                );
-                CREATE TABLE IF NOT EXISTS queue_prompts (
-                    source_id TEXT NOT NULL,
-                    prompt_key TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    line_number INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY (source_id, prompt_key)
-                );
-                CREATE INDEX IF NOT EXISTS queue_prompts_pending
-                    ON queue_prompts (
-                        source_id, active, file_path, line_number, prompt_key
-                    );
-                CREATE TABLE IF NOT EXISTS completed_prompts (
-                    prompt_key TEXT PRIMARY KEY,
-                    completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                """
+        version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+        tables = {
+            row["name"]
+            for row in self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
+        }
+        application_tables = tables & {
+            "source_files",
+            "queue_prompts",
+            "completed_prompts",
+        }
+        if version == 0 and application_tables:
+            raise SourceQueueSchemaError(
+                f"unversioned source queue schema in {self.path}; "
+                "remove the development state database and restart"
+            )
+        if version not in {0, self._SCHEMA_VERSION}:
+            raise SourceQueueSchemaError(
+                f"unsupported source queue schema {version} in {self.path}; "
+                f"expected {self._SCHEMA_VERSION}"
+            )
+        self._db.execute("BEGIN")
+        try:
+            self._create_schema()
+            self._db.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
+            self._db.commit()
+        except BaseException:
+            self._db.rollback()
+            raise
 
-    def _import_legacy_progress(self, path: Path) -> None:
-        imported = self._db.execute(
-            "SELECT value FROM source_queue_state WHERE key = ?",
-            ("legacy_progress_imported",),
-        ).fetchone()
-        if imported is not None:
-            return
-        with self._db:
-            if path.exists():
-                with path.open(encoding="utf-8") as fh:
-                    for raw in fh:
-                        key = raw.rstrip("\n")
-                        if key:
-                            self._db.execute(
-                                "INSERT OR IGNORE INTO completed_prompts(prompt_key) "
-                                "VALUES (?)",
-                                (key,),
-                            )
-            self._db.execute(
-                "INSERT INTO source_queue_state(key, value) VALUES (?, ?)",
-                ("legacy_progress_imported", "1"),
+    def _create_schema(self) -> None:
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_files (
+                file_id INTEGER PRIMARY KEY,
+                source_id BLOB NOT NULL,
+                file_key BLOB NOT NULL,
+                path TEXT NOT NULL,
+                device INTEGER NOT NULL,
+                inode INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                line_count INTEGER NOT NULL,
+                ends_newline INTEGER NOT NULL,
+                tail_hash BLOB NOT NULL,
+                content_hash BLOB NOT NULL,
+                seen_scan INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(source_id, path)
             )
+            """
+        )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS queue_prompts (
+                source_id BLOB NOT NULL,
+                prompt_id BLOB NOT NULL,
+                file_id INTEGER NOT NULL REFERENCES source_files(file_id)
+                    ON DELETE CASCADE,
+                line_number INTEGER NOT NULL,
+                byte_offset INTEGER NOT NULL,
+                byte_length INTEGER NOT NULL,
+                text_hash BLOB NOT NULL,
+                occurrence INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (source_id, prompt_id)
+            ) WITHOUT ROWID
+            """
+        )
+        self._db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS source_files_inode
+            ON source_files (source_id, active, device, inode)
+            """
+        )
+        self._db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS source_files_size
+            ON source_files (source_id, size)
+            """
+        )
+        self._db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS queue_prompts_pending
+            ON queue_prompts (
+                source_id, active, file_id, line_number, prompt_id
+            )
+            """
+        )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS completed_prompts (
+                prompt_id BLOB PRIMARY KEY,
+                completed_at INTEGER NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
 
     @staticmethod
     def _snapshot(stat: os.stat_result) -> tuple[int, int, int, int]:
         return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
     @staticmethod
-    def _tail_hash(data: bytes) -> str:
-        return blake2b(data, digest_size=16).hexdigest()
+    def _tail_hash(data: bytes) -> bytes:
+        return blake2b(data, digest_size=16).digest()
+
+    @staticmethod
+    def _extend_content_hash(digest: bytes, raw: bytes) -> bytes:
+        return blake2b(digest + raw, digest_size=16).digest()
+
+    @staticmethod
+    def _text_hash(text: str) -> bytes:
+        return blake2b(text.encode(), digest_size=16).digest()
+
+    @staticmethod
+    def _prompt_identifier(
+        file_key: bytes,
+        text_hash: bytes,
+        occurrence: int,
+    ) -> bytes:
+        digest = blake2b(digest_size=16)
+        digest.update(file_key)
+        digest.update(text_hash)
+        digest.update(occurrence.to_bytes(8, "big"))
+        return digest.digest()
 
     def _stored_file(self, path: str) -> sqlite3.Row | None:
         return self._db.execute(
@@ -484,13 +562,145 @@ class SourceQueue:
             (self.source_id, path),
         ).fetchone()
 
-    def _prompt_row(self, prompt: Prompt) -> PromptRow:
+    def _file_fingerprint(
+        self,
+        file: Path,
+        before: os.stat_result,
+    ) -> tuple[bytes, Counter[bytes]]:
+        digest = EMPTY_CONTENT_HASH
+        prompts: Counter[bytes] = Counter()
+        with file.open("rb") as fh:
+            for raw in fh:
+                digest = self._extend_content_hash(digest, raw)
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text and not text.startswith("#"):
+                    prompts[self._text_hash(text)] += 1
+        if self._snapshot(before) != self._snapshot(file.stat()):
+            raise _FileChangedDuringIndex(str(file))
+        return digest, prompts
+
+    def _matching_moved_file(
+        self,
+        file: Path,
+        stat: os.stat_result,
+    ) -> sqlite3.Row | None:
+        file_string = str(file)
+        inode_matches = [
+            row
+            for row in self._db.execute(
+                """
+                SELECT * FROM source_files
+                WHERE source_id = ? AND active = 1
+                  AND device = ? AND inode = ? AND path != ?
+                """,
+                (self.source_id, stat.st_dev, stat.st_ino, file_string),
+            )
+            if not Path(row["path"]).exists()
+        ]
+        if len(inode_matches) == 1:
+            return inode_matches[0]
+
+        missing_candidates = [
+            row
+            for row in self._db.execute(
+                """
+                SELECT * FROM source_files
+                WHERE source_id = ? AND path != ?
+                """,
+                (self.source_id, file_string),
+            )
+            if not Path(row["path"]).exists()
+        ]
+        if not missing_candidates:
+            return None
+        content_hash, new_prompts = self._file_fingerprint(file, stat)
+        exact_matches = [
+            row
+            for row in missing_candidates
+            if row["size"] == stat.st_size and row["content_hash"] == content_hash
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if len(exact_matches) > 1 or not new_prompts:
+            return None
+
+        scores: list[tuple[float, int, sqlite3.Row]] = []
+        new_total = new_prompts.total()
+        for candidate in missing_candidates:
+            old_prompts = Counter(
+                {
+                    bytes(row["text_hash"]): int(row["count"])
+                    for row in self._db.execute(
+                        """
+                        SELECT text_hash, COUNT(*) AS count
+                        FROM queue_prompts
+                        WHERE source_id = ? AND file_id = ?
+                        GROUP BY text_hash
+                        """,
+                        (self.source_id, candidate["file_id"]),
+                    )
+                }
+            )
+            old_total = old_prompts.total()
+            overlap = sum((new_prompts & old_prompts).values())
+            similarity = overlap / max(new_total, old_total, 1)
+            if similarity >= 0.5:
+                scores.append((similarity, overlap, candidate))
+        if not scores:
+            return None
+        scores.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        best = scores[0]
+        if len(scores) > 1 and best[:2] == scores[1][:2]:
+            return None
+        return best[2]
+
+    def _adopt_moved_file(
+        self,
+        stored: sqlite3.Row,
+        path: str,
+        seen_scan: int,
+    ) -> sqlite3.Row:
+        file_id = int(stored["file_id"])
+        with self._db:
+            self._db.execute(
+                """
+                UPDATE source_files
+                SET path = ?, seen_scan = ?, active = 1
+                WHERE file_id = ?
+                """,
+                (path, seen_scan, file_id),
+            )
+            self._db.execute(
+                """
+                UPDATE queue_prompts SET active = 1
+                WHERE source_id = ? AND file_id = ?
+                """,
+                (self.source_id, file_id),
+            )
+        adopted = self._stored_file(path)
+        if adopted is None:
+            raise RuntimeError(f"failed to adopt moved source file: {path}")
+        return adopted
+
+    def _prompt_row(
+        self,
+        prompt: Prompt,
+        file_id: int,
+        file_key: bytes,
+        text_hash: bytes,
+        occurrence: int,
+        byte_offset: int,
+        byte_length: int,
+    ) -> PromptRow:
         return (
             self.source_id,
-            prompt.key,
-            str(prompt.file),
+            self._prompt_identifier(file_key, text_hash, occurrence),
+            file_id,
             prompt.line,
-            prompt.text,
+            byte_offset,
+            byte_length,
+            text_hash,
+            occurrence,
         )
 
     def _record_prompt_rows(self, rows: list[PromptRow]) -> None:
@@ -500,32 +710,23 @@ class SourceQueue:
 
     def _record_file(
         self,
-        path: str,
+        file_id: int,
         stat: os.stat_result,
         line_count: int,
         ends_newline: bool,
-        tail_hash: str,
+        tail_hash: bytes,
+        content_hash: bytes,
         seen_scan: int,
     ) -> None:
         self._db.execute(
             """
-            INSERT INTO source_files(
-                source_id, path, device, inode, size, mtime_ns,
-                line_count, ends_newline, tail_hash, seen_scan
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_id, path) DO UPDATE SET
-                device = excluded.device,
-                inode = excluded.inode,
-                size = excluded.size,
-                mtime_ns = excluded.mtime_ns,
-                line_count = excluded.line_count,
-                ends_newline = excluded.ends_newline,
-                tail_hash = excluded.tail_hash,
-                seen_scan = excluded.seen_scan
+            UPDATE source_files
+            SET device = ?, inode = ?, size = ?, mtime_ns = ?,
+                line_count = ?, ends_newline = ?, tail_hash = ?,
+                content_hash = ?, seen_scan = ?, active = 1
+            WHERE file_id = ?
             """,
             (
-                self.source_id,
-                path,
                 stat.st_dev,
                 stat.st_ino,
                 stat.st_size,
@@ -533,53 +734,112 @@ class SourceQueue:
                 line_count,
                 int(ends_newline),
                 tail_hash,
+                content_hash,
+                seen_scan,
+                file_id,
+            ),
+        )
+
+    def _ensure_file(
+        self,
+        path: str,
+        stat: os.stat_result,
+        seen_scan: int,
+    ) -> sqlite3.Row:
+        self._db.execute(
+            """
+            INSERT OR IGNORE INTO source_files(
+                source_id, file_key, path, device, inode, size, mtime_ns,
+                line_count, ends_newline, tail_hash, content_hash,
+                seen_scan, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, 1)
+            """,
+            (
+                self.source_id,
+                os.urandom(16),
+                path,
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                b"",
+                EMPTY_CONTENT_HASH,
                 seen_scan,
             ),
         )
+        row = self._stored_file(path)
+        if row is None:
+            raise RuntimeError(f"failed to register source file: {path}")
+        return row
 
     def _full_index(
         self,
         file: Path,
         before: os.stat_result,
         seen_scan: int,
+        stored: sqlite3.Row | None = None,
     ) -> None:
         file_string = str(file)
         line_count = 0
+        byte_offset = 0
         tail = b""
+        content_hash = EMPTY_CONTENT_HASH
         last_line = b""
+        occurrences: Counter[bytes] = Counter()
         rows: list[PromptRow] = []
         with self._db:
+            stored = (
+                stored
+                if stored is not None
+                else self._ensure_file(file_string, before, seen_scan)
+            )
+            file_id = int(stored["file_id"])
+            file_key = bytes(stored["file_key"])
             self._db.execute(
                 "UPDATE queue_prompts SET active = 0 "
-                "WHERE source_id = ? AND file_path = ?",
-                (self.source_id, file_string),
+                "WHERE source_id = ? AND file_id = ?",
+                (self.source_id, file_id),
             )
             with file.open("rb") as fh:
                 for line_count, raw in enumerate(fh, start=1):
+                    byte_length = len(raw)
                     last_line = raw
                     tail = (tail + raw)[-self._TAIL_BYTES:]
+                    content_hash = self._extend_content_hash(content_hash, raw)
                     text = raw.decode("utf-8", errors="replace").strip()
                     if text and not text.startswith("#"):
-                        row = self._prompt_row(Prompt(file, line_count, text))
-                        if row is not None:
-                            rows.append(row)
-                            if len(rows) >= self._INSERT_BATCH:
-                                self._record_prompt_rows(rows)
+                        text_hash = self._text_hash(text)
+                        occurrences[text_hash] += 1
+                        rows.append(
+                            self._prompt_row(
+                                Prompt(file, line_count, text),
+                                file_id,
+                                file_key,
+                                text_hash,
+                                occurrences[text_hash],
+                                byte_offset,
+                                byte_length,
+                            )
+                        )
+                        if len(rows) >= self._INSERT_BATCH:
+                            self._record_prompt_rows(rows)
+                    byte_offset += byte_length
             self._record_prompt_rows(rows)
             after = file.stat()
             if self._snapshot(before) != self._snapshot(after):
                 raise _FileChangedDuringIndex(file_string)
             self._db.execute(
                 "DELETE FROM queue_prompts "
-                "WHERE source_id = ? AND file_path = ? AND active = 0",
-                (self.source_id, file_string),
+                "WHERE source_id = ? AND file_id = ? AND active = 0",
+                (self.source_id, file_id),
             )
             self._record_file(
-                file_string,
+                file_id,
                 after,
                 line_count,
                 not last_line or last_line.endswith(b"\n"),
                 self._tail_hash(tail),
+                content_hash,
                 seen_scan,
             )
 
@@ -610,8 +870,13 @@ class SourceQueue:
         seen_scan: int,
     ) -> None:
         file_string = str(file)
+        file_id = int(stored["file_id"])
+        file_key = bytes(stored["file_key"])
         line_count = stored["line_count"]
+        byte_offset = stored["size"]
+        content_hash = bytes(stored["content_hash"])
         last_line = b""
+        occurrences: dict[bytes, int] = {}
         rows: list[PromptRow] = []
         with self._db:
             with file.open("rb") as fh:
@@ -619,14 +884,38 @@ class SourceQueue:
                 for line_count, raw in enumerate(
                     fh, start=stored["line_count"] + 1
                 ):
+                    byte_length = len(raw)
                     last_line = raw
+                    content_hash = self._extend_content_hash(content_hash, raw)
                     text = raw.decode("utf-8", errors="replace").strip()
                     if text and not text.startswith("#"):
-                        row = self._prompt_row(Prompt(file, line_count, text))
-                        if row is not None:
-                            rows.append(row)
-                            if len(rows) >= self._INSERT_BATCH:
-                                self._record_prompt_rows(rows)
+                        text_hash = self._text_hash(text)
+                        if text_hash not in occurrences:
+                            row = self._db.execute(
+                                """
+                                SELECT COALESCE(MAX(occurrence), 0) AS occurrence
+                                FROM queue_prompts
+                                WHERE source_id = ? AND file_id = ?
+                                  AND text_hash = ?
+                                """,
+                                (self.source_id, file_id, text_hash),
+                            ).fetchone()
+                            occurrences[text_hash] = int(row["occurrence"])
+                        occurrences[text_hash] += 1
+                        rows.append(
+                            self._prompt_row(
+                                Prompt(file, line_count, text),
+                                file_id,
+                                file_key,
+                                text_hash,
+                                occurrences[text_hash],
+                                byte_offset,
+                                byte_length,
+                            )
+                        )
+                        if len(rows) >= self._INSERT_BATCH:
+                            self._record_prompt_rows(rows)
+                    byte_offset += byte_length
             self._record_prompt_rows(rows)
             after = file.stat()
             if self._snapshot(before) != self._snapshot(after):
@@ -636,11 +925,12 @@ class SourceQueue:
                 fh.seek(start)
                 tail = fh.read()
             self._record_file(
-                file_string,
+                file_id,
                 after,
                 line_count,
                 not last_line or last_line.endswith(b"\n"),
                 self._tail_hash(tail),
+                content_hash,
                 seen_scan,
             )
 
@@ -654,8 +944,16 @@ class SourceQueue:
         for _attempt in range(2):
             before = file.stat()
             stored = self._stored_file(file_string)
+            if stored is None:
+                try:
+                    moved = self._matching_moved_file(file, before)
+                except _FileChangedDuringIndex:
+                    continue
+                if moved is not None:
+                    stored = self._adopt_moved_file(moved, file_string, seen_scan)
             if (
                 stored is not None
+                and stored["active"]
                 and self._snapshot(before)
                 == (
                     stored["device"],
@@ -666,7 +964,7 @@ class SourceQueue:
             ):
                 with self._db:
                     self._db.execute(
-                        "UPDATE source_files SET seen_scan = ? "
+                        "UPDATE source_files SET seen_scan = ?, active = 1 "
                         "WHERE source_id = ? AND path = ?",
                         (seen_scan, self.source_id, file_string),
                     )
@@ -675,7 +973,7 @@ class SourceQueue:
                 if stored is not None and self._can_append(file, before, stored):
                     self._append_index(file, before, stored, seen_scan)
                 else:
-                    self._full_index(file, before, seen_scan)
+                    self._full_index(file, before, seen_scan, stored)
                 return True
             except _FileChangedDuringIndex:
                 continue
@@ -685,21 +983,22 @@ class SourceQueue:
         value = str(path.expanduser().resolve())
         prefix = value.rstrip(os.sep) + os.sep
         rows = self._db.execute(
-            "SELECT path FROM source_files WHERE source_id = ? "
-            "AND (path = ? OR substr(path, 1, ?) = ?)",
+            "SELECT file_id, path FROM source_files WHERE source_id = ? "
+            "AND active = 1 AND (path = ? OR substr(path, 1, ?) = ?)",
             (self.source_id, value, len(prefix), prefix),
         ).fetchall()
         with self._db:
             for row in rows:
                 self._db.execute(
-                    "DELETE FROM queue_prompts "
-                    "WHERE source_id = ? AND file_path = ?",
-                    (self.source_id, row["path"]),
+                    "UPDATE source_files SET active = 0 WHERE file_id = ?",
+                    (row["file_id"],),
                 )
                 self._db.execute(
-                    "DELETE FROM source_files "
-                    "WHERE source_id = ? AND path = ?",
-                    (self.source_id, row["path"]),
+                    """
+                    UPDATE queue_prompts SET active = 0
+                    WHERE source_id = ? AND file_id = ?
+                    """,
+                    (self.source_id, row["file_id"]),
                 )
         return len(rows)
 
@@ -711,7 +1010,7 @@ class SourceQueue:
             changed += int(self.index_file(file, scan))
         stale = self._db.execute(
             "SELECT path FROM source_files "
-            "WHERE source_id = ? AND seen_scan != ?",
+            "WHERE source_id = ? AND active = 1 AND seen_scan != ?",
             (self.source_id, scan),
         ).fetchall()
         for row in stale:
@@ -721,6 +1020,7 @@ class SourceQueue:
     def update_paths(self, paths: set[Path]) -> int:
         """Apply filesystem changes without walking the full source tree."""
         changed = 0
+        missing: list[Path] = []
         for path in sorted({item.expanduser().resolve() for item in paths}):
             if not any(
                 path == root
@@ -737,34 +1037,76 @@ class SourceQueue:
             elif path.is_file():
                 changed += int(self.index_file(path))
             else:
-                changed += self._remove_path(path)
+                missing.append(path)
+        for path in missing:
+            changed += self._remove_path(path)
         return changed
 
     def next_pending(self) -> Prompt | None:
-        row = self._db.execute(
-            """
-            SELECT q.file_path, q.line_number, q.text
-            FROM queue_prompts AS q
-            LEFT JOIN completed_prompts AS c ON c.prompt_key = q.prompt_key
-            WHERE q.source_id = ? AND q.active = 1
-              AND c.prompt_key IS NULL
-            ORDER BY q.file_path, q.line_number, q.prompt_key
-            LIMIT 1
-            """,
-            (self.source_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return Prompt(Path(row["file_path"]), row["line_number"], row["text"])
+        unstable_file: Path | None = None
+        unstable_attempts = 0
+        while True:
+            row = self._db.execute(
+                """
+                SELECT f.path, f.file_id, f.file_key, q.line_number,
+                       q.byte_offset, q.byte_length, q.text_hash,
+                       q.occurrence, q.prompt_id
+                FROM queue_prompts AS q
+                JOIN source_files AS f ON f.file_id = q.file_id
+                LEFT JOIN completed_prompts AS c ON c.prompt_id = q.prompt_id
+                WHERE q.source_id = ? AND q.active = 1
+                  AND c.prompt_id IS NULL
+                ORDER BY f.path, q.line_number, q.prompt_id
+                LIMIT 1
+                """,
+                (self.source_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            file = Path(row["path"])
+            try:
+                with file.open("rb") as fh:
+                    fh.seek(row["byte_offset"])
+                    raw = fh.read(row["byte_length"])
+            except OSError:
+                self._remove_path(file)
+                continue
+            text = raw.decode("utf-8", errors="replace").strip()
+            text_hash = self._text_hash(text)
+            identifier = self._prompt_identifier(
+                bytes(row["file_key"]), text_hash, row["occurrence"]
+            )
+            if (
+                len(raw) == row["byte_length"]
+                and text_hash == row["text_hash"]
+                and identifier == row["prompt_id"]
+            ):
+                return Prompt(file, row["line_number"], text, identifier)
+            if file == unstable_file:
+                unstable_attempts += 1
+            else:
+                unstable_file = file
+                unstable_attempts = 1
+            if unstable_attempts >= 3:
+                raise OSError(f"prompt source kept changing while reading {file}")
+            stored = self._stored_file(str(file))
+            if stored is None:
+                continue
+            try:
+                self._full_index(file, file.stat(), 0, stored)
+            except FileNotFoundError:
+                self._remove_path(file)
+            except _FileChangedDuringIndex:
+                continue
 
     def counts(self) -> tuple[int, int, int]:
         row = self._db.execute(
             """
             SELECT
                 COUNT(*) AS total,
-                COALESCE(SUM(c.prompt_key IS NOT NULL), 0) AS done
+                COALESCE(SUM(c.prompt_id IS NOT NULL), 0) AS done
             FROM queue_prompts AS q
-            LEFT JOIN completed_prompts AS c ON c.prompt_key = q.prompt_key
+            LEFT JOIN completed_prompts AS c ON c.prompt_id = q.prompt_id
             WHERE q.source_id = ? AND q.active = 1
             """,
             (self.source_id,),
@@ -776,8 +1118,11 @@ class SourceQueue:
     def mark(self, prompt: Prompt) -> None:
         with self._db:
             self._db.execute(
-                "INSERT OR IGNORE INTO completed_prompts(prompt_key) VALUES (?)",
-                (prompt.key,),
+                """
+                INSERT OR IGNORE INTO completed_prompts(prompt_id, completed_at)
+                VALUES (?, ?)
+                """,
+                (prompt.identifier, int(time.time())),
             )
 
     def reset(self) -> int:
@@ -786,8 +1131,8 @@ class SourceQueue:
             cursor = self._db.execute(
                 """
                 DELETE FROM completed_prompts
-                WHERE prompt_key IN (
-                    SELECT prompt_key FROM queue_prompts
+                WHERE prompt_id IN (
+                    SELECT prompt_id FROM queue_prompts
                     WHERE source_id = ? AND active = 1
                 )
                 """,
@@ -874,10 +1219,10 @@ class SourceWatcher:
 class ThemeProgress:
     """Atomic progress and resolved seeds for resumable theme generation."""
 
-    def __init__(self, output_dir: str | os.PathLike, theme: str,
+    def __init__(self, state_dir: str | os.PathLike, theme: str,
                  seeds: dict[str, int],
                  system_prompt: str = EXPANSION_SYSTEM_PROMPT):
-        self.path = Path(output_dir).expanduser() / THEME_PROGRESS_NAME
+        self.path = Path(state_dir).expanduser() / THEME_PROGRESS_NAME
         self.path.parent.mkdir(parents=True, exist_ok=True)
         identity = (
             theme

@@ -121,6 +121,7 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["blend-upscale-model"] == "4xNomosWebPhoto_RealPLKSR.pth"
     assert generated["blend-mode"] == "normal"
     assert generated["run-seedvr2"] is True
+    assert generated["state-dir"] == "state"
     assert generated["output-dir"] == "output"
 
     args = parse_args(["--config", str(file)])
@@ -128,6 +129,7 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert args.steps == 8
     assert args.sampler_name == "euler_ancestral"
     assert args.run_seedvr2 is True
+    assert args.state_dir == "state"
     assert args.output_dir == "output"
     cfg = config_from_args(args)
     assert 0 <= cfg.seed <= cli.MAX_SEED
@@ -272,7 +274,6 @@ def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkey
 
     source = tmp_path / "prompts.txt"
     source.write_text("one prompt\n")
-    prompt = next(batch.iter_prompts(source))
     rendered = []
     monkeypatch.setattr(
         cli,
@@ -286,6 +287,7 @@ def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkey
 
     with batch.SourceQueue(source, cfg.output_dir) as queue:
         queue.reconcile()
+        prompt = queue.next_pending()
         monkeypatch.setattr(
             queue,
             "counts",
@@ -316,7 +318,8 @@ def test_theme_mode_resumes_with_saved_seeds(tmp_path, monkeypatch):
         lambda cfg: rendered.append(cfg) or SimpleNamespace(paths=["image.jpg"]),
     )
     cfg = WorkflowConfig(
-        output_dir=str(tmp_path),
+        state_dir=str(tmp_path / "state"),
+        output_dir=str(tmp_path / "output"),
         seed=100,
         usdu_seed=200,
         seedvr2=SeedVR2Config(seed=300),
@@ -334,7 +337,8 @@ def test_theme_mode_resumes_with_saved_seeds(tmp_path, monkeypatch):
     assert rendered[1].seedvr2.seed == 301
 
     resumed = WorkflowConfig(
-        output_dir=str(tmp_path),
+        state_dir=str(tmp_path / "state"),
+        output_dir=str(tmp_path / "output"),
         seed=999,
         usdu_seed=999,
         seedvr2=SeedVR2Config(seed=999),
@@ -376,6 +380,7 @@ def test_one_shot_prompt_ignores_configured_source(tmp_path, monkeypatch):
     file.write_text(
         'prompt-mode = "source"\n'
         'source = "/does/not/exist"\n'
+        f'state-dir = "{tmp_path / "state"}"\n'
         f'output-dir = "{tmp_path / "output"}"\n'
     )
     rendered = []
@@ -401,6 +406,7 @@ def test_one_shot_prompt_ignores_queue_only_settings(tmp_path, monkeypatch):
         'theme = "forest"\n'
         "prompt-count = -1\n"
         "reconcile-interval = -1\n"
+        f'state-dir = "{tmp_path / "state"}"\n'
         f'output-dir = "{tmp_path / "output"}"\n'
     )
     monkeypatch.setattr(
@@ -441,7 +447,9 @@ def test_main_routes_configured_input_mode(
 ):
     file = tmp_path / "krea2pipe.toml"
     file.write_text(
-        mode_config + f'output-dir = "{tmp_path / "output"}"\n'
+        mode_config
+        + f'state-dir = "{tmp_path / "state"}"\n'
+        + f'output-dir = "{tmp_path / "output"}"\n'
     )
     calls = []
     monkeypatch.setattr(
@@ -577,7 +585,8 @@ def test_reset_status_cli_clears_source_completion(tmp_path):
     source = tmp_path / "prompts.txt"
     source.write_text("one\ntwo\n")
     output = tmp_path / "output"
-    with batch.SourceQueue(source, output) as queue:
+    state = tmp_path / "state"
+    with batch.SourceQueue(source, state) as queue:
         queue.reconcile()
         queue.mark(queue.next_pending())
 
@@ -585,11 +594,12 @@ def test_reset_status_cli_clears_source_completion(tmp_path):
     file.write_text(
         'prompt-mode = "source"\n'
         f'sources = ["{source}"]\n'
+        f'state-dir = "{state}"\n'
         f'output-dir = "{output}"\n'
     )
 
     assert main(["--config", str(file), "--reset-status"]) == 0
-    with batch.SourceQueue(source, output) as queue:
+    with batch.SourceQueue(source, state) as queue:
         queue.reconcile()
         assert queue.counts() == (2, 0, 2)
 
@@ -599,9 +609,10 @@ def test_reset_status_cli_clears_theme_completion(tmp_path):
     from krea2pipe.prompting import EXPANSION_SYSTEM_PROMPT
 
     output = tmp_path / "output"
+    state = tmp_path / "state"
     seeds = {"base": 1, "usdu": 2, "seedvr2": 3}
     progress = batch.ThemeProgress(
-        output,
+        state,
         "quiet forest",
         seeds,
         EXPANSION_SYSTEM_PROMPT,
@@ -611,12 +622,13 @@ def test_reset_status_cli_clears_theme_completion(tmp_path):
     file.write_text(
         'prompt-mode = "theme"\n'
         'theme = "quiet forest"\n'
+        f'state-dir = "{state}"\n'
         f'output-dir = "{output}"\n'
     )
 
     assert main(["--config", str(file), "--reset-status"]) == 0
     restarted = batch.ThemeProgress(
-        output,
+        state,
         "quiet forest",
         seeds,
         EXPANSION_SYSTEM_PROMPT,
@@ -696,6 +708,7 @@ def test_canonical_config_exposes_every_optional_stage():
     assert cfg.seedvr2.model_dir == "/data/ComfyUI/models/SEEDVR2"
     assert cfg.color_match_method == "hm-mkl-hm"
     assert cfg.blend_upscale_model_name == "4xNomosWebPhoto_RealPLKSR.pth"
+    assert cfg.state_dir == "state"
 
 
 def test_config_rejects_relative_model_root(tmp_path):

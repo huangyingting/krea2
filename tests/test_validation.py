@@ -52,6 +52,7 @@ def test_preflight_reports_the_missing_model_and_resolved_path(tmp_path):
 def test_preflight_rejects_output_path_escape_before_inference(tmp_path):
     cfg = _minimal_model_root(tmp_path / "models")
     cfg.save = True
+    cfg.state_dir = str(tmp_path / "state")
     cfg.output_dir = str(tmp_path / "output")
     cfg.subdir = "../outside"
     with pytest.raises(ValueError, match="escapes output-dir"):
@@ -63,6 +64,7 @@ def test_preflight_creates_and_probes_the_resolved_output_destination(
 ):
     cfg = _minimal_model_root(tmp_path / "models")
     cfg.save = True
+    cfg.state_dir = str(tmp_path / "state")
     cfg.output_dir = str(tmp_path / "output")
     cfg.subdir = "renders"
     cfg.filename = "daily/%width/image"
@@ -77,6 +79,7 @@ def test_preflight_creates_and_probes_the_resolved_output_destination(
 
     validation.preflight(cfg)
 
+    assert (tmp_path / "state").is_dir()
     width, _height = cfg.resolve_size()
     destination = tmp_path / "output" / "renders" / "daily" / str(width)
     assert destination.is_dir()

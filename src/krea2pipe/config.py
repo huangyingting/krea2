@@ -3,6 +3,7 @@
 A config file is a flat mapping of generation and queue settings, e.g.::
 
     sources = ["/data/prompts/**/*.txt", "!/data/prompts/archive/**"]
+    state-dir = "/data/state"
     output-dir = "/data/renders"
     steps = 8
     reconcile-interval = 300 # Safety scan every five minutes
@@ -60,7 +61,8 @@ _HELP_OVERRIDES = {
     "batch_size": "Number of independent images generated together for each prompt; larger values increase VRAM usage",
     "model_root": "Absolute model-library root containing diffusion_models, text_encoders, vae, loras, upscale_models, and SEEDVR2",
     "loras": "LoRAs under model-root/loras, applied in listed order with independent strengths; use an empty array to disable all LoRAs",
-    "output_dir": "Persistent output root for images, the SQLite source queue, theme progress, and the process lock; relative paths resolve from the working directory",
+    "state_dir": "Persistent operational state root containing the SQLite source queue, theme progress, and process lock; keep it separate from disposable image output; relative paths resolve from the working directory",
+    "output_dir": "Image output root; it may be removed while the service is idle without losing queue completion state; relative paths resolve from the working directory",
     "filename": "Filename template supporting %time, %date, %width, %height, and %counter; collisions are resolved safely",
     "subdir": "Subdirectory below output-dir; an empty string writes directly to the output root",
     "quality": "JPEG/WebP quality from 1 to 100; PNG ignores this value",
@@ -75,7 +77,7 @@ _GROUP_INTROS = {
     "input mode": (
         "Only the block selected by prompt-mode is validated and used.",
         "Source entries include paths; entries beginning with ! exclude paths and never re-include them.",
-        "Source mode stores its queue in output-dir/.krea2pipe-source.sqlite3 using WAL synchronous=NORMAL.",
+        "Source mode stores its queue in state-dir/.krea2pipe-source.sqlite3 using WAL synchronous=NORMAL.",
         "Use `krea2pipe --config FILE --reset-status` to clear completion state without deleting images.",
     ),
     "resolution": (
@@ -91,7 +93,7 @@ _GROUP_INTROS = {
     ),
     "output": (
         "PNG, JPEG, and WebP include the versioned generation manifest and A1111-compatible parameters.",
-        "Relative output paths resolve from the process working directory, not from the TOML file location.",
+        "Relative state and output paths resolve from the process working directory, not from the TOML file location.",
     ),
     "stages / runtime": (
         "Disabled stages are skipped entirely, including their model validation and loading.",
@@ -163,7 +165,7 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "# Quick start:",
         "#   1. Select `prompt-mode = \"source\"` or `prompt-mode = \"theme\"`.",
         "#   2. Configure the matching source or theme block below.",
-        "#   3. Set `output-dir` to a persistent directory.",
+        "#   3. Keep `state-dir` persistent and set `output-dir` for images.",
         "#   4. Run: krea2pipe --config krea2pipe.toml",
         "#",
         "# Only settings for the selected mode are used; the other mode is ignored.",
@@ -172,15 +174,14 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "# A full source reconciliation runs every 300 seconds as a safety net.",
         "#",
         "# Path resolution:",
-        "#   - Relative source and output paths use the process working directory.",
+        "#   - Relative source, state, and output paths use the process working directory.",
         "#   - The TOML file's directory does not affect relative paths.",
         "#   - Model-root must be absolute; checkpoint names may be relative to it.",
-        "#   - The supplied systemd unit uses WorkingDirectory=/home/azadmin/krea2.",
+        "#   - The supplied systemd unit uses WorkingDirectory=/data/krea2.",
         "#",
         "# Operational state:",
-        "#   - Source queue: OUTPUT_DIR/.krea2pipe-source.sqlite3.",
-        "#   - Theme progress: OUTPUT_DIR/.krea2pipe-theme-progress.json.",
-        "#   - Existing .krea2pipe-progress.tsv files are imported once.",
+        "#   - Source queue: STATE_DIR/.krea2pipe-source.sqlite3.",
+        "#   - Theme progress: STATE_DIR/.krea2pipe-theme-progress.json.",
         "#   - WAL NORMAL avoids per-image fsync; abrupt power loss may replay work.",
         "#",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",

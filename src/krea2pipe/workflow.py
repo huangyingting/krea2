@@ -94,6 +94,7 @@ class WorkflowConfig:
     blend_mode: str = "normal"
 
     # --- image output ---
+    state_dir: str = "state"
     output_dir: str = "output"
     filename: str = "%time"
     subdir: str = "AIKC"

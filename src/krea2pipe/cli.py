@@ -258,8 +258,10 @@ def build_config_parser() -> argparse.ArgumentParser:
                    help="normal, multiply, screen, overlay, soft_light, or difference")
 
     g = p.add_argument_group("output")
+    g.add_argument("--state-dir", default=d.state_dir,
+                   help="persistent queue, progress, and process-lock directory")
     g.add_argument("--output-dir", "-o", default=d.output_dir,
-                   help="persistent output root; also stores the batch resume ledger")
+                   help="image output root")
     g.add_argument("--filename", default=d.filename,
                    help="filename template; supports %time, %date, %width, %height, %counter")
     g.add_argument("--subdir", default=d.subdir,
@@ -403,6 +405,7 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
         seedvr2=seedvr2,
         blend_factor=blend_factor,
         blend_mode=blend_mode,
+        state_dir=args.state_dir,
         output_dir=args.output_dir,
         filename=args.filename,
         subdir=args.subdir,
@@ -502,7 +505,10 @@ def _run_source_queue(
     reconcile_interval: float,
 ) -> int:
     """Run an event-driven source queue with periodic full reconciliation."""
-    with batch.SourceQueue(source_spec, cfg.output_dir) as queue:
+    with batch.SourceQueue(
+        source_spec,
+        cfg.state_dir,
+    ) as queue:
         if reconcile_interval == 0:
             queue.reconcile()
             _render_pending(cfg, queue, announce_empty=True)
@@ -569,7 +575,7 @@ def _run_reconciliation_fallback(
 
 def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
     progress = batch.ThemeProgress(
-        cfg.output_dir,
+        cfg.state_dir,
         theme,
         {"base": cfg.seed, "usdu": cfg.usdu_seed, "seedvr2": cfg.seedvr2.seed},
         cfg.theme_system_prompt,
@@ -721,12 +727,15 @@ def _reset_status(
     if mode == "source":
         if source_spec is None:
             raise RuntimeError("source mode requires a resolved source specification")
-        with batch.SourceQueue(source_spec, cfg.output_dir) as queue:
+        with batch.SourceQueue(
+            source_spec,
+            cfg.state_dir,
+        ) as queue:
             queue.reconcile()
             reset = queue.reset()
     else:
         progress = batch.ThemeProgress(
-            cfg.output_dir,
+            cfg.state_dir,
             args.theme,
             {
                 "base": cfg.seed,
@@ -762,17 +771,19 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("theme mode requires saving so generation can resume safely")
 
     lock = (
-        batch.OutputLock(cfg.output_dir)
+        batch.OutputLock(cfg.state_dir)
         if cfg.save or args.reset_status
         else nullcontext()
     )
     try:
         with lock:
             logger.info(
-                "starting device=%s batch-size=%d model-root=%s output-dir=%s",
+                "starting device=%s batch-size=%d model-root=%s "
+                "state-dir=%s output-dir=%s",
                 cfg.device,
                 cfg.batch_size,
                 cfg.model_root,
+                cfg.state_dir,
                 cfg.output_dir if cfg.save else "(saving disabled)",
             )
             if args.reset_status:

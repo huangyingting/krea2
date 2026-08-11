@@ -286,20 +286,33 @@ sources = [
   "!/data/krea2/prompts/**/draft-?.txt",
 ]
 batch-size = 2
+state-dir = "/data/krea2/state"
+output-dir = "/data/krea2/output"
 ```
 
 Source mode is an event-driven consumer. Linux filesystem events index newly
-added files immediately; existing immutable files are not reread. Prompt rows
-and completion state live in
-`OUTPUT_DIR/.krea2pipe-source.sqlite3`, so millions of prompts need not be held
-in memory. A metadata-only tree reconciliation runs every five minutes by
-default to recover from missed events or unsupported filesystems. Set
-`reconcile-interval = 0` for a finite run that consumes the current files and
-exits.
+added files immediately; existing immutable files are not reread. Byte offsets,
+lengths, compact prompt IDs, and completion state live in
+`STATE_DIR/.krea2pipe-source.sqlite3`; full prompt text remains only in source
+files and one prompt is read on demand. A metadata-only tree reconciliation
+runs every five minutes by default to recover from missed events or unsupported
+filesystems. Set `reconcile-interval = 0` for a finite run that consumes the
+current files and exits.
+
+Each indexed file receives a persistent random identity. Same-filesystem
+renames retain it through device/inode matching; Git-style moves that recreate
+the file use exact content or unique prompt-similarity matching. Prompt IDs use
+that file identity, normalized prompt content, and duplicate occurrence rather
+than path or line number. Renaming a file or adding, deleting, and reordering
+lines therefore does not rerender unchanged prompts. A copy made while the
+original still exists is intentionally treated as a distinct source. Moves
+outside the configured `sources` patterns are inactive until they return.
 
 SQLite uses WAL with `synchronous=NORMAL`, so status commits do not fsync every
 image. Process crashes remain transactional; an abrupt power loss may replay a
-recent prompt rather than incorrectly skipping unfinished work.
+recent prompt rather than incorrectly skipping unfinished work. Keep
+`state-dir` persistent. `output-dir` contains images only and may be removed
+while the service is idle without losing queue completion state.
 
 Normal `sources` entries include files and leading-`!` entries exclude them.
 Patterns support Git-style `*`, `**`, `?`, and character classes such as
@@ -346,15 +359,14 @@ theme-system-prompt = "请将主题扩写成一个详细的中文图像生成提
 
 Theme progress, the resolved base/USDU/SeedVR2 seeds, and the next prompt index
 are atomically persisted in
-`OUTPUT_DIR/.krea2pipe-theme-progress.json`. Restarting resumes the same
+`STATE_DIR/.krea2pipe-theme-progress.json`. Restarting resumes the same
 sequence; increasing a finite `prompt-count` continues it. The expanded prompt,
 original theme, index, prompt seed, and expansion-system source are also stored
 inside every image's reproducibility manifest.
 
 After an image is saved, its prompt key is committed transactionally to the
 SQLite queue. If the process or machine stops mid-image, that prompt remains
-pending and is safely retried. Existing `.krea2pipe-progress.tsv` ledgers are
-imported once during upgrade. To consume the selected source or theme again,
+pending and is safely retried. To consume the selected source or theme again,
 clear only its completion state:
 
 ```bash
@@ -366,18 +378,22 @@ Resetting status does not delete existing images.
 The recommended service configuration is TOML:
 
 ```bash
-uv run krea2pipe --generate-config
-# Edit sources, output-dir, and model-root, then:
-sudo cp deploy/krea2pipe.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now krea2pipe
+sudo deploy/install-krea2pipe-service.sh
 journalctl -u krea2pipe -f
 ```
+
+The installer runs the service as `azadmin`, installs the locked environment and
+application under `/data/krea2`, configures `/data/ComfyUI/models` as the model
+root, and enables the systemd service. Prompt files placed under
+`/data/krea2/prompts` are consumed recursively and images are written under
+`/data/krea2/output`. Existing configuration and outputs are preserved when the
+installer is rerun. Pass `--no-start` to install or update the service without
+starting it.
 
 `--generate-config` writes `krea2pipe.toml` in the current directory. Pass a
 path to write elsewhere, for example
 `krea2pipe --generate-config /etc/krea2pipe.toml`. The generated file contains
-every supported default with comments; optional `source`, `theme`, `width`,
+every supported default with comments; optional `sources`, `theme`, `width`,
 and `height` entries are left commented. Existing files are never overwritten.
 Set `prompt-mode` to select one configured block; the other block is ignored.
 A one-shot `--prompt` ignores both blocks but retains every generation setting
@@ -387,7 +403,7 @@ Common service settings use concise values and support independent sampling
 controls:
 
 ```toml
-model-root = "/data/models"
+model-root = "/data/ComfyUI/models"
 aspect-ratio = "16:9"
 seed = "random"
 sampler = "euler_ancestral"

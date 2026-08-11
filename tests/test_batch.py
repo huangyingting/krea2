@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import sqlite3
+
 import pytest
 
 from krea2pipe import batch
@@ -111,6 +115,117 @@ def test_source_queue_accepts_an_explicit_file_with_any_extension(tmp_path):
         assert queue.counts() == (1, 0, 1)
 
 
+def test_source_queue_rejects_unversioned_schema_for_future_migration(tmp_path):
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\n")
+    state = tmp_path / "state"
+    state.mkdir()
+    with sqlite3.connect(state / batch.SOURCE_QUEUE_NAME) as db:
+        db.execute("CREATE TABLE queue_prompts(text TEXT NOT NULL)")
+
+    with pytest.raises(batch.SourceQueueSchemaError, match="unversioned"):
+        batch.SourceQueue(source, state)
+
+
+def test_source_queue_rejects_an_older_version(tmp_path):
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\n")
+    state = tmp_path / "state"
+    state.mkdir()
+    with sqlite3.connect(state / batch.SOURCE_QUEUE_NAME) as db:
+        db.execute("PRAGMA user_version=1")
+
+    with pytest.raises(batch.SourceQueueSchemaError, match=r"schema 1.*expected 2"):
+        batch.SourceQueue(source, state)
+
+
+def test_source_queue_initializes_schema_atomically(tmp_path, monkeypatch):
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\n")
+    state = tmp_path / "state"
+    original_create_schema = batch.SourceQueue._create_schema
+
+    def interrupt_after_schema_creation(queue):
+        original_create_schema(queue)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(batch.SourceQueue, "_create_schema", interrupt_after_schema_creation)
+        with pytest.raises(KeyboardInterrupt):
+            batch.SourceQueue(source, state)
+
+    with sqlite3.connect(state / batch.SOURCE_QUEUE_NAME) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+        tables = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert not tables & {"source_files", "queue_prompts", "completed_prompts"}
+
+    with batch.SourceQueue(source, state) as queue:
+        assert queue._db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_source_queue_state_survives_deleted_image_output(tmp_path):
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\n")
+    state = tmp_path / "state"
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "image.jpg").write_bytes(b"image")
+
+    with batch.SourceQueue(source, state) as queue:
+        queue.reconcile()
+        queue.mark(queue.next_pending())
+        shutil.rmtree(output)
+        source.write_text("one\ntwo\n")
+        queue.update_paths({source})
+
+        assert queue.counts() == (2, 1, 1)
+        assert queue.next_pending().text == "two"
+
+
+def test_compact_source_queue_does_not_store_large_prompt_text(tmp_path):
+    source = tmp_path / "prompts.txt"
+    source.write_text(
+        "".join(f"{line:04d}-{'x' * 1195}\n" for line in range(1000))
+    )
+    state = tmp_path / "state"
+
+    with batch.SourceQueue(source, state) as queue:
+        queue.reconcile()
+        while prompt := queue.next_pending():
+            queue.mark(prompt)
+        queue._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        queue._db.execute("VACUUM")
+        assert queue.counts() == (1000, 1000, 0)
+        assert queue._db.execute("PRAGMA user_version").fetchone()[0] == 2
+        columns = {
+            row["name"]
+            for row in queue._db.execute("PRAGMA table_info(queue_prompts)")
+        }
+        assert "text" not in columns and "file_path" not in columns
+
+    database = state / batch.SOURCE_QUEUE_NAME
+    assert database.stat().st_size < 250_000
+    assert source.stat().st_size > 1_200_000
+
+
+def test_source_queue_hash_verifies_prompt_read_by_byte_offset(tmp_path):
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\n")
+
+    with batch.SourceQueue(source, tmp_path / "state") as queue:
+        queue.reconcile()
+        original = source.stat()
+        source.write_text("two\n")
+        os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+        assert queue.next_pending().text == "two"
+
+
 def test_source_spec_canonicalizes_symlinked_inputs(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
@@ -210,6 +325,91 @@ def test_source_queue_indexes_only_appended_lines(tmp_path):
         assert queue.next_pending().text == "three"
 
 
+def test_source_queue_preserves_status_across_rename_and_line_edits(tmp_path):
+    source = tmp_path / "source"
+    state = tmp_path / "state"
+    source.mkdir()
+    original = source / "original.txt"
+    original.write_text("one\ntwo\nthree\n")
+
+    with batch.SourceQueue(source, state) as queue:
+        queue.reconcile()
+        first = queue.next_pending()
+        assert first.text == "one"
+        original_file_id = first.identifier
+        queue.mark(first)
+
+        moved = source / "nested" / "moved.txt"
+        moved.parent.mkdir()
+        original.rename(moved)
+        moved.write_text("zero\none\nthree\nfour\n")
+        queue.reconcile()
+
+        assert queue.counts() == (4, 1, 3)
+        prompts = []
+        while prompt := queue.next_pending():
+            prompts.append(prompt)
+            queue.mark(prompt)
+        assert [prompt.text for prompt in prompts] == ["zero", "three", "four"]
+        one_id = queue._db.execute(
+            """
+            SELECT q.prompt_id
+            FROM queue_prompts AS q
+            JOIN source_files AS f ON f.file_id = q.file_id
+            WHERE f.path = ? AND q.line_number = 2
+            """,
+            (str(moved),),
+        ).fetchone()[0]
+        assert one_id == original_file_id
+
+
+def test_source_queue_matches_git_style_recreated_move_with_edits(tmp_path):
+    source = tmp_path / "source"
+    state = tmp_path / "state"
+    source.mkdir()
+    original = source / "original.txt"
+    original.write_text("one\ntwo\nthree\n")
+
+    with batch.SourceQueue(source, state) as queue:
+        queue.reconcile()
+        queue.mark(queue.next_pending())
+        queue.mark(queue.next_pending())
+
+        original.unlink()
+        queue.update_paths({original})
+        moved = source / "renamed.txt"
+        moved.write_text("zero\none\ntwo\nthree\n")
+        queue.update_paths({moved})
+
+        assert queue.counts() == (4, 2, 2)
+        pending = []
+        while prompt := queue.next_pending():
+            pending.append(prompt.text)
+            queue.mark(prompt)
+        assert pending == ["zero", "three"]
+        assert queue._db.execute(
+            "SELECT COUNT(*) FROM source_files WHERE active = 1"
+        ).fetchone()[0] == 1
+
+
+def test_source_queue_treats_a_copy_as_a_distinct_file(tmp_path):
+    source = tmp_path / "source"
+    state = tmp_path / "state"
+    source.mkdir()
+    original = source / "original.txt"
+    copy = source / "copy.txt"
+    original.write_text("same\n")
+
+    with batch.SourceQueue(source, state) as queue:
+        queue.reconcile()
+        queue.mark(queue.next_pending())
+        shutil.copy2(original, copy)
+        queue.update_paths({copy})
+
+        assert queue.counts() == (2, 1, 1)
+        assert queue.next_pending().file == copy.resolve()
+
+
 def test_source_queue_reindexes_only_a_changed_file(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "output"
@@ -242,20 +442,35 @@ def test_source_queue_removes_deleted_pending_files(tmp_path):
         assert queue.counts() == (0, 0, 0)
 
 
-def test_source_queue_survives_restart_and_imports_legacy_progress(tmp_path):
-    source = tmp_path / "prompts.txt"
-    output = tmp_path / "output"
-    source.write_text("one\ntwo\n")
-    prompts = list(batch.iter_prompts(source))
-    legacy = batch.Progress(output)
-    legacy.mark(prompts[0])
+def test_source_queue_skips_multiple_deleted_files_during_read(tmp_path):
+    source = tmp_path / "source"
+    state = tmp_path / "state"
+    source.mkdir()
+    deleted = [source / f"{index}.txt" for index in range(4)]
+    for file in deleted:
+        file.write_text("deleted\n")
+    (source / "remaining.txt").write_text("remaining\n")
 
-    with batch.SourceQueue(source, output) as queue:
+    with batch.SourceQueue(source, state) as queue:
         queue.reconcile()
-        assert queue.counts() == (2, 1, 1)
+        for file in deleted:
+            file.unlink()
+        assert queue.next_pending().text == "remaining"
+        assert queue.counts() == (1, 0, 1)
+
+
+def test_source_queue_survives_restart(tmp_path):
+    source = tmp_path / "prompts.txt"
+    state = tmp_path / "state"
+    source.write_text("one\ntwo\n")
+
+    with batch.SourceQueue(source, state) as queue:
+        queue.reconcile()
+        assert queue.counts() == (2, 0, 2)
+        queue.mark(queue.next_pending())
         queue.mark(queue.next_pending())
 
-    with batch.SourceQueue(source, output) as resumed:
+    with batch.SourceQueue(source, state) as resumed:
         resumed.reconcile()
         assert resumed.counts() == (2, 2, 0)
 
