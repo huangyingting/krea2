@@ -49,9 +49,19 @@ done
 
 [[ "${EUID}" -eq 0 ]] || fail "Run this installer as root, for example with sudo."
 
-for command in chmod getent install mktemp rsync runuser sh systemctl usermod; do
+for command in chmod getent grep install mktemp rsync runuser sed sh systemctl usermod; do
     command -v "${command}" >/dev/null || fail "Required command not found: ${command}"
 done
+
+if ! command -v dpkg-query >/dev/null \
+    || [[ "$(dpkg-query -W -f='${Status}' python3-dev 2>/dev/null || true)" \
+        != "install ok installed" ]]; then
+    command -v apt-get >/dev/null || fail \
+        "python3-dev is required, but apt-get is unavailable."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3-dev
+fi
 
 UV_SOURCE=""
 if [[ -n "${UV_BIN:-}" ]]; then

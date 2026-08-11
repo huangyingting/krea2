@@ -411,6 +411,19 @@ This follows Astral's
 and its
 [`UV_UNMANAGED_INSTALL` guidance](https://docs.astral.sh/uv/reference/installer/).
 
+Before creating the uv environment, the installer checks Debian package state
+and installs `python3-dev` when missing:
+
+```bash
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  python3-dev
+```
+
+This provides `Python.h` for locked dependencies that need to compile native
+extensions. The check is idempotent, so later deployments skip `apt-get` when
+`python3-dev` is already installed.
+
 ### Local HTTP image API
 
 Service mode is configured with three flat TOML keys:
