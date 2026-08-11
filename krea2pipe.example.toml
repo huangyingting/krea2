@@ -1,0 +1,24 @@
+# Generate a complete default file with `krea2pipe --generate-config`.
+# This shorter example contains only the recommended service overrides.
+#
+# Required for batch/service mode. This may be one prompt file or a directory;
+# directories are scanned recursively in filename order.
+source = "/data/krea2/prompts"
+
+# Keep the process alive and rescan for appended/new prompt lines. Loaded
+# models and compiled graphs remain resident, so subsequent images are fast.
+watch = 10
+
+# The resume ledger is stored here as .krea2pipe-progress.tsv.
+output-dir = "/data/krea2/output"
+
+# The workflow's performance-tuned defaults are used for everything else.
+# Override a value only when the requested output itself needs to change:
+# aspect-ratio = "1:1"
+# batch-size = 1               # independent images generated per prompt line
+# seed = 1099257494857840
+# steps = 8
+# extension = "jpg"
+# quality = 100
+# run-color-match = true
+# run-blend = true

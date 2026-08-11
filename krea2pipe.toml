@@ -1,0 +1,139 @@
+# krea2pipe configuration
+#
+# Quick start:
+#   1. Uncomment `source` and point it at a prompt file or directory.
+#   2. Set `output-dir` to a persistent directory.
+#   3. Set `watch` above zero for a continuously running service.
+#   4. Run: krea2pipe --config krea2pipe.toml
+#
+# Command-line options override this file. Model names are resolved from
+# $COMFYUI_ROOT/models (default: /data/ComfyUI/models). Keep this file flat:
+# use the keys shown below rather than adding TOML [section] tables.
+
+# --- positional arguments ---
+# prompt file, or a folder of prompt files; one image is rendered per non-empty line
+# and completed lines are skipped on restart
+# source = "/data/krea2/prompts"
+
+# --- prompt ---
+# a single prompt (default: built-in demo prompt 'A moody cinematic portrait of a red
+# fox '...)
+# prompt = "A description of the image to generate"
+# after finishing, keep rescanning FILE_OR_DIR every SECONDS for new lines instead of
+# exiting (for running as a service)
+watch = 0
+
+# --- resolution ---
+# 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9
+aspect-ratio = "1:1"
+# approximate base-image area before USDU and SeedVR2 upscaling
+megapixels = 1.5
+# round computed width and height to this model-safe multiple
+multiple-of = 32
+# exact base width override; set height as well
+# width = 1248
+# exact base height override; set width as well
+# height = 1248
+# number of independent images generated for each prompt
+batch-size = 1
+
+# --- sampling (KSamplerAdvanced) ---
+# integer seed or 'random' (chosen once at startup)
+seed = 1099257494857840
+# base Krea 2 diffusion steps
+steps = 8
+# base guidance scale; 1 matches Krea 2 and skips negative guidance
+cfg = 1.0
+# base sampler: euler or euler_ancestral
+sampler = "euler_ancestral"
+# base scheduler: normal, sgm_uniform, or simple
+scheduler = "sgm_uniform"
+
+# --- models ---
+# Krea 2 checkpoint under models/diffusion_models
+unet = "moodyKrea2Mix_v50BF16.safetensors"
+# Qwen text encoder under models/text_encoders
+clip = "qwen3vl_4b_bf16.safetensors"
+# Qwen Image VAE under models/vae
+vae = "qwen_image_vae.safetensors"
+# LoRAs under models/loras; add array entries with individual strengths
+loras = [
+  { name = "atmospheric photography.safetensors", strength = 0.6 },
+]
+# model under models/upscale_models used by UltimateSDUpscale
+upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
+
+# --- UltimateSDUpscale ---
+# UltimateSDUpscale output scale relative to the base image
+usdu-upscale-by = 2.0
+# integer seed or 'random' (chosen once at startup)
+usdu-seed = 82616517812345
+# diffusion steps per USDU tile
+usdu-steps = 2
+# upscale sampler: euler or euler_ancestral
+usdu-sampler = "euler"
+# upscale scheduler: normal, sgm_uniform, or simple
+usdu-scheduler = "simple"
+# tile denoise strength from 0 to 1; higher values alter more detail
+usdu-denoise = 0.1
+# tile traversal/seam-fixing mode: Linear, Chess, or None
+usdu-mode = "Chess"
+
+# --- ColorMatch ---
+# run the standalone ColorMatch stage
+run-color-match = true
+# color transfer: default, hm, reinhard, mvgd, mkl, hm-mvgd-hm, or hm-mkl-hm
+color-match-method = "hm-mkl-hm"
+# transfer strength from 0 (off) to 1 (full)
+color-match-strength = 0.22
+
+# --- SeedVR2 ---
+# target short-edge pixels; aspect ratio is preserved
+seedvr2-resolution = 4096
+# long-edge pixel cap used to limit VRAM
+seedvr2-max-resolution = 4096
+# integer seed or 'random' (chosen once at startup)
+seedvr2-seed = 1234567892
+# SeedVR2 DiT checkpoint under models/SEEDVR2
+seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"
+# SeedVR2-internal correction: none, wavelet, adain, or lab
+seedvr2-color-correction = "lab"
+
+# --- Upscale blend ---
+# run the separate model-upscale/Lanczos/blend stage
+run-blend = true
+# model under models/upscale_models used only by final blend
+blend-upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
+# blend strength from 0 to 1
+blend-factor = 0.4
+# normal, multiply, screen, overlay, soft_light, or difference
+blend-mode = "normal"
+
+# --- output ---
+# persistent output root; also stores the batch resume ledger
+output-dir = "output"
+# filename template; supports %time, %date, %width, %height, %counter
+filename = "%time"
+# subdirectory created below output-dir; empty writes to the root
+subdir = "AIKC"
+# output image format: png, jpg, jpeg, or webp
+extension = "jpg"
+# JPEG/WebP quality from 1 to 100
+quality = 100
+# also write the base / USDU / ColorMatch / SeedVR2 stages
+save-intermediates = false
+# write generated images to disk
+save = true
+
+# --- stages / runtime ---
+# run UltimateSDUpscale
+run-usdu = true
+# run the SeedVR2 upscaler
+run-seedvr2 = true
+# PyTorch device; use cuda for the supported production path
+device = "cuda"
+# model compute precision; keep bfloat16 unless debugging or using hardware without
+# bfloat16 support
+dtype = "bfloat16"
+# enable detailed diagnostic logging
+verbose = false
