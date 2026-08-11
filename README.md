@@ -393,9 +393,10 @@ starting it. The deployment script targets a Debian/Ubuntu systemd host; the
 
 Before starting the sandboxed application, the unit runs
 `nvidia-modprobe -u` with privileges to load NVIDIA Unified Virtual Memory and
-create its device nodes. Krea2 itself remains unprivileged with
-`NoNewPrivileges=true`. This prevents CUDA initialization failures after a
-reboot when `nvidia_uvm` has not yet been loaded by another process.
+create its device nodes. It then retries a PyTorch CUDA initialization probe in
+fresh processes until UVM is usable, covering the short cold-boot interval in
+which the module is loaded but CUDA still reports no devices. Krea2 itself
+remains unprivileged with `NoNewPrivileges=true`.
 
 The unit explicitly waits for the filesystems containing `/data/krea2` and
 `/data/ComfyUI/models`. This includes the `/data` mount when both directories

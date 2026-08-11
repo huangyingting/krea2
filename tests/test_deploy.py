@@ -10,11 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy" / "install-krea2pipe-service.sh"
 UNIT = ROOT / "deploy" / "krea2pipe.service"
 RETRY_UNIT = ROOT / "deploy" / "krea2pipe-retry.service"
+CUDA_PROBE = ROOT / "deploy" / "krea2pipe-wait-for-cuda"
 
 
 def test_service_installer_has_valid_bash_syntax():
     assert INSTALLER.stat().st_mode & 0o111
     subprocess.run(["bash", "-n", str(INSTALLER)], check=True)
+    subprocess.run(["sh", "-n", str(CUDA_PROBE)], check=True)
 
 
 def test_service_installer_provisions_requested_paths():
@@ -47,6 +49,7 @@ def test_service_installer_provisions_requested_paths():
     assert "api-port = 8787" in script
     assert "reconcile-interval = 300" in script
     assert '"${APP_HOME}/bin/uv" sync' in script
+    assert '"${SOURCE_ROOT}/deploy/krea2pipe-wait-for-cuda"' in script
     assert 'sources = ["/data/krea2/prompts/**/*.txt"]' in script
     assert '"${SOURCE_ROOT}/deploy/krea2pipe-retry.service"' in script
     assert "systemctl enable --now" in script
@@ -64,6 +67,7 @@ def test_systemd_unit_uses_dedicated_home_and_model_library():
     assert "RequiresMountsFor=/data/krea2 /data/ComfyUI/models" in unit
     assert "OnFailure=krea2pipe-retry.service" in unit
     assert "ExecStartPre=+/usr/bin/nvidia-modprobe -u" in unit
+    assert "ExecStartPre=/data/krea2/bin/krea2pipe-wait-for-cuda" in unit
     assert "NoNewPrivileges=true" in unit
 
 

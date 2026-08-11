@@ -215,6 +215,9 @@ runuser -u "${SERVICE_USER}" -- env \
         --frozen \
         --no-dev
 
+install -m 0755 \
+    "${SOURCE_ROOT}/deploy/krea2pipe-wait-for-cuda" \
+    "${APP_HOME}/bin/krea2pipe-wait-for-cuda"
 install -m 0644 "${SOURCE_ROOT}/deploy/krea2pipe.service" "${UNIT_PATH}"
 install -m 0644 \
     "${SOURCE_ROOT}/deploy/krea2pipe-retry.service" "${RETRY_UNIT_PATH}"
