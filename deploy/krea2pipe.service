@@ -18,6 +18,8 @@ Environment=PYTHONUNBUFFERED=1
 # Cache compiled CUDA kernels across service and machine restarts.
 Environment=TORCHINDUCTOR_CACHE_DIR=/var/cache/krea2pipe/inductor
 CacheDirectory=krea2pipe
+# Initialize Unified Virtual Memory before NoNewPrivileges blocks the setuid helper.
+ExecStartPre=+/usr/bin/nvidia-modprobe -u
 # If the previous run crashed, the Inductor compile cache may contain
 # truncated entries (e.g. EOFError/AttributeError on stale kernels).
 # Purge it before starting again so a bad cache can't wedge restarts.

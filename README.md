@@ -391,6 +391,12 @@ installer is rerun. Pass `--no-start` to install or update the service without
 starting it. The deployment script targets a Debian/Ubuntu systemd host; the
 `azadmin` account and `/data/ComfyUI/models` must already exist.
 
+Before starting the sandboxed application, the unit runs
+`nvidia-modprobe -u` with privileges to load NVIDIA Unified Virtual Memory and
+create its device nodes. Krea2 itself remains unprivileged with
+`NoNewPrivileges=true`. This prevents CUDA initialization failures after a
+reboot when `nvidia_uvm` has not yet been loaded by another process.
+
 The unit explicitly waits for the filesystems containing `/data/krea2` and
 `/data/ComfyUI/models`. This includes the `/data` mount when both directories
 live there. If a required mount or its RAID device misses systemd's initial

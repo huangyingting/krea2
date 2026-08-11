@@ -50,7 +50,7 @@ done
 
 [[ "${EUID}" -eq 0 ]] || fail "Run this installer as root, for example with sudo."
 
-for command in chmod getent grep install mktemp rsync runuser sed sh systemctl usermod; do
+for command in chmod getent grep install mktemp nvidia-modprobe rsync runuser sed sh systemctl usermod; do
     command -v "${command}" >/dev/null || fail "Required command not found: ${command}"
 done
 

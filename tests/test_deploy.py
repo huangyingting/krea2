@@ -37,6 +37,7 @@ def test_service_installer_provisions_requested_paths():
     assert 'wget -qO "${UV_INSTALLER}"' in script
     assert 'UV_UNMANAGED_INSTALL="${APP_HOME}/bin"' in script
     assert "UV_NO_MODIFY_PATH=1" in script
+    assert "nvidia-modprobe" in script
     assert 'chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APP_HOME}"' in script
     assert "install -d -m 2770" in script
     assert '"${APP_HOME}/state"' in script
@@ -62,6 +63,8 @@ def test_systemd_unit_uses_dedicated_home_and_model_library():
     assert "ReadWritePaths=/data/krea2" in unit
     assert "RequiresMountsFor=/data/krea2 /data/ComfyUI/models" in unit
     assert "OnFailure=krea2pipe-retry.service" in unit
+    assert "ExecStartPre=+/usr/bin/nvidia-modprobe -u" in unit
+    assert "NoNewPrivileges=true" in unit
 
 
 def test_systemd_retry_covers_failures_before_service_process_start():
