@@ -254,6 +254,7 @@ The public CLI has three actions:
 | --- | --- |
 | `krea2pipe --config FILE` | Run the `source` or `theme` mode configured in TOML |
 | `krea2pipe --config FILE --prompt TEXT` | Generate `TEXT` once; configured source/theme queue settings are ignored |
+| `krea2pipe --config FILE --reset-status` | Clear completion state for the selected mode and exit |
 | `krea2pipe --generate-config [FILE]` | Write a complete documented TOML template and exit |
 
 Generation always requires `--config FILE`; only template generation does not.
@@ -266,24 +267,60 @@ settings live in TOML. Configuration switches such as `--source`, `--theme`,
 
 | `prompt-mode` | Used settings | Ignored settings |
 | --- | --- | --- |
-| `"source"` | `source`, `watch` | `theme`, `theme-system-prompt`, `prompt-count` |
-| `"theme"` | `theme`, `theme-system-prompt`, `prompt-count` | `source`, `watch` |
+| `"source"` | `sources`, source filters, `reconcile-interval` | Theme settings |
+| `"theme"` | `theme`, `theme-system-prompt`, `prompt-count` | Source settings |
 
 Both blocks may remain configured, making mode changes a one-line edit. CLI
 `--prompt` is the one-time mode and ignores both configured blocks.
 
-For file queue mode, set `source` to one text file or directory. Each non-empty,
-non-comment line is one prompt; directories are scanned recursively in stable
-filename order. When `batch-size` is greater than one, every line produces
-that many images. Source mode polls every 10 seconds when `watch` is omitted;
-set `watch = 0` only for a finite batch that should exit after the current
-queue:
+For file queue mode, `sources` accepts any mixture of files and directories.
+Each non-empty, non-comment line is one prompt. Directories are recursive, and
+`batch-size` images are generated together for each line:
 
 ```toml
 prompt-mode = "source"
-source = "/data/krea2/prompts"
+sources = [
+  "/data/krea2/prompts",
+  "/data/krea2/campaign.prompts",
+]
 batch-size = 2
+
+# Gitignore-style paths relative to each source directory.
+source-ignore = [
+  "archive/",
+  "**/draft-*",
+  "!archive/keep.prompts",
+]
+
+# Optional additional filters.
+# source-file-regex = "\\.(txt|prompt|prompts)$"
+# source-prompt-regex = "portrait|landscape"
+# source-modified-after = "2026-01-01T00:00:00Z"
+# source-modified-before = "2027-01-01T00:00:00Z"
 ```
+
+Source mode is an event-driven consumer. Linux filesystem events index newly
+added files immediately; existing immutable files are not reread. Prompt rows
+and completion state live in
+`OUTPUT_DIR/.krea2pipe-source.sqlite3`, so millions of prompts need not be held
+in memory. A metadata-only tree reconciliation runs every five minutes by
+default to recover from missed events or unsupported filesystems. Set
+`reconcile-interval = 0` for a finite run that consumes the current files and
+exits.
+
+SQLite uses WAL with `synchronous=NORMAL`, so status commits do not fsync every
+image. Process crashes remain transactional; an abrupt power loss may replay a
+recent prompt rather than incorrectly skipping unfinished work.
+
+`source-file-regex` matches paths relative to each source directory;
+`source-prompt-regex` matches prompt text. Modification-time bounds use
+ISO-8601 and compare against filesystem `mtime`: `source-modified-after` is
+inclusive and `source-modified-before` is exclusive. Git-style `!` patterns
+re-include paths. For reliable ingestion, write a temporary file and atomically
+rename it to a supported prompt extension when complete.
+
+Legacy `source = "PATH"` and `watch = SECONDS` settings remain accepted as
+aliases for a one-item `sources` list and `reconcile-interval`.
 
 ### Resident-Qwen theme mode
 
@@ -297,8 +334,8 @@ prompt-count = 0
 ```
 
 `prompt-count` is optional. Omitting it or setting it to zero runs continuously
-until interrupted; a positive value makes the theme run finite. `watch` and
-all other source settings are ignored in this mode. Qwen remains on the GPU
+until interrupted; a positive value makes the theme run finite. All source
+settings are ignored in this mode. Qwen remains on the GPU
 across generation,
 using Krea 2's official
 [`docs/expansion.txt`](https://github.com/krea-ai/krea-2/blob/db3984fbc6e13b34c0064990fc2d95ac64d00058/docs/expansion.txt)
@@ -323,18 +360,23 @@ sequence; increasing a finite `prompt-count` continues it. The expanded prompt,
 original theme, index, prompt seed, and expansion-system source are also stored
 inside every image's reproducibility manifest.
 
-After an image is saved, its absolute source filename, line number and content
-digest are fsynced to `OUTPUT_DIR/.krea2pipe-progress.tsv`. If the process or
-machine stops mid-image, that line is not marked; the next run safely retries
-it. Completed ledger entries are not rendered again, while an edited line is
-treated as new work. New files and appended lines are picked up by
-service/watch mode.
+After an image is saved, its prompt key is committed transactionally to the
+SQLite queue. If the process or machine stops mid-image, that prompt remains
+pending and is safely retried. Existing `.krea2pipe-progress.tsv` ledgers are
+imported once during upgrade. To consume the selected source or theme again,
+clear only its completion state:
+
+```bash
+uv run krea2pipe --config krea2pipe.toml --reset-status
+```
+
+Resetting status does not delete existing images.
 
 The recommended service configuration is TOML:
 
 ```bash
 uv run krea2pipe --generate-config
-# edit source, output-dir, and model-root, then:
+# Edit sources, output-dir, and model-root, then:
 sudo cp deploy/krea2pipe.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now krea2pipe
@@ -424,9 +466,9 @@ The supplied unit keeps the `torch.compile` cache under
 `/var/cache/krea2pipe`, so it survives a reboot. It restarts after transient
 failures but stops after three failures in five minutes instead of looping on
 a bad configuration. Adjust its `User`, paths and config before installing it
-on another account. Future AI prompt generation can simply append lines or
-write new text files to the watched source directory; the renderer and resume
-mechanism need no change.
+on another account. Producers can atomically add prompt files to any configured
+source directory; the event-driven consumer indexes them without rescanning
+existing file contents.
 
 ### Production failure handling and logging
 

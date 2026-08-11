@@ -7,13 +7,27 @@
 prompt-mode = "source"
 
 # --- Source mode -----------------------------------------------------------
-# This may be one prompt file or a directory. Directories are scanned
-# Recursively in filename order.
-source = "/data/krea2/prompts"
+# Mix any number of prompt files and recursively watched folders.
+sources = [
+  "/data/krea2/prompts",
+  "/data/krea2/campaign.prompts",
+]
 
-# Keep the process alive and rescan for appended/new prompt lines. Loaded
-# Models and compiled graphs remain resident, so subsequent images are fast.
-watch = 10
+# Gitignore-style exclusions relative to each source folder.
+source-ignore = [
+  "archive/",
+  "**/draft-*",
+]
+
+# Filesystem events add new files immediately. This interval is only a safety
+# Reconciliation for missed events; zero consumes the current queue and exits.
+reconcile-interval = 300
+
+# Optional path, prompt-text, and modification-time filters.
+# source-file-regex = "\\.(txt|prompt|prompts)$"
+# source-prompt-regex = "portrait|landscape"
+# source-modified-after = "2026-01-01T00:00:00Z"
+# source-modified-before = "2027-01-01T00:00:00Z"
 
 # --- Theme mode ------------------------------------------------------------
 # Change only prompt-mode to "theme" to activate these settings.
@@ -24,7 +38,7 @@ theme = "Quiet architecture where nature and technology coexist"
 # Zero means generate continuously until the service is stopped.
 prompt-count = 0
 
-# The resume ledger is stored here as .krea2pipe-progress.tsv.
+# The durable SQLite queue is stored here as .krea2pipe-source.sqlite3.
 output-dir = "/data/krea2/output"
 
 # Absolute standalone model library; relative checkpoint names resolve from here.

@@ -18,13 +18,13 @@ def test_toml_config_supplies_service_options(tmp_path):
         'prompt-mode = "source"\n'
         'source = "/data/prompts"\n'
         'output-dir = "/data/output"\n'
-        "watch = 30\n"
+        "reconcile-interval = 30\n"
         "steps = 6\n"
     )
     args = parse_args(["--config", str(file)])
-    assert args.source == "/data/prompts"
+    assert args.sources == "/data/prompts"
     assert args.output_dir == "/data/output"
-    assert args.watch == 30
+    assert args.reconcile_interval == 30
     assert args.steps == 6
 
 
@@ -33,12 +33,12 @@ def test_one_shot_prompt_keeps_toml_generation_settings(tmp_path):
     file.write_text(
         'prompt-mode = "source"\n'
         'source = "/config/prompts"\n'
-        "watch = 30\n"
+        "reconcile-interval = 30\n"
         "steps = 6\n"
     )
     args = parse_args(["--config", str(file), "--prompt", "a fox"])
-    assert args.source == "/config/prompts"
-    assert args.watch == 30
+    assert args.sources == "/config/prompts"
+    assert args.reconcile_interval == 30
     assert args.steps == 6
     assert args.prompt == "a fox"
 
@@ -61,6 +61,7 @@ def test_config_rejects_non_toml_files(tmp_path):
     ["/data/prompts"],
     ["--theme", "forest"],
     ["--watch", "5"],
+    ["--reconcile-interval", "5"],
     ["--batch-size", "2"],
     ["--device", "cpu"],
 ])
@@ -85,18 +86,21 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["usdu-seed"] == "random"
     assert generated["seedvr2-seed"] == "random"
     assert generated["prompt-mode"] == "source"
+    assert generated["source-ignore"] == []
     from krea2pipe.prompting import EXPANSION_SYSTEM_PROMPT
 
     assert generated["theme-system-prompt"] == EXPANSION_SYSTEM_PROMPT
     assert "prompt-count" not in generated
-    assert "watch" not in generated
+    assert "reconcile-interval" not in generated
     assert "# prompt-count = 0" in file.read_text()
-    assert "# watch = 10" in file.read_text()
+    assert "# reconcile-interval = 300" in file.read_text()
     assert "# theme = " in file.read_text()
-    assert "# source = " in file.read_text()
+    assert "# sources = " in file.read_text()
+    assert "# source-file-regex = " in file.read_text()
+    assert "# source-modified-after = " in file.read_text()
     assert "\nprompt = " not in file.read_text()
     assert 'prompt-mode = "source"\n\n# SOURCE MODE' in file.read_text()
-    assert "# watch = 10\n\n# THEME MODE" in file.read_text()
+    assert "\n\n# THEME MODE" in file.read_text()
     assert not [
         line
         for line in file.read_text().splitlines()
@@ -177,6 +181,63 @@ def test_toml_accepts_cli_option_aliases(tmp_path):
     assert args.run_usdu is False
 
 
+def test_toml_accepts_multiple_sources_and_filters(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'prompt-mode = "source"\n'
+        'sources = ["/data/first", "/data/second.txt"]\n'
+        'source-ignore = ["archive/", "draft-*.txt"]\n'
+        'source-file-regex = "\\\\.(txt|prompt)$"\n'
+        'source-prompt-regex = "portrait"\n'
+        'source-modified-after = "2026-01-01T00:00:00Z"\n'
+    )
+    args = parse_args(["--config", str(file)])
+
+    assert cli._resolve_input_mode(args) == "source"
+    source_filter = cli._source_filter(args)
+    assert args.sources == ["/data/first", "/data/second.txt"]
+    assert source_filter.ignore == ("archive/", "draft-*.txt")
+    assert source_filter.prompt_regex == "portrait"
+
+
+def test_toml_accepts_legacy_source_and_watch_keys(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'prompt-mode = "source"\n'
+        'source = "/data/prompts"\n'
+        "watch = 45\n"
+    )
+    args = parse_args(["--config", str(file)])
+
+    assert cli._resolve_input_mode(args) == "source"
+    assert args.sources == ["/data/prompts"]
+    assert args.reconcile_interval == 45
+
+
+def test_toml_rejects_source_alias_with_sources(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'source = "/data/prompts"\n'
+        'sources = ["/data/other"]\n'
+    )
+    with pytest.raises(SystemExit, match="same setting 'sources'"):
+        parse_args(["--config", str(file)])
+
+
+def test_source_mode_rejects_invalid_filter(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'prompt-mode = "source"\n'
+        'sources = ["/data/prompts"]\n'
+        'source-file-regex = "["\n'
+    )
+    args = parse_args(["--config", str(file)])
+    cli._resolve_input_mode(args)
+
+    with pytest.raises(SystemExit, match="invalid regular expression"):
+        cli._source_filter(args)
+
+
 def test_toml_supports_random_seeds(tmp_path, monkeypatch):
     file = tmp_path / "krea2pipe.toml"
     file.write_text(
@@ -225,7 +286,14 @@ def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkey
         seedvr2=SeedVR2Config(seed=cli.MAX_SEEDVR2),
     )
 
-    assert cli._render_pending(cfg, str(source)) == 1
+    with batch.SourceQueue(source, cfg.output_dir) as queue:
+        queue.reconcile()
+        monkeypatch.setattr(
+            queue,
+            "counts",
+            lambda: pytest.fail("queue-wide count ran in the per-prompt path"),
+        )
+        assert cli._render_pending(cfg, queue) == 1
     assert rendered[0].seedvr2.seed == (
         cfg.seedvr2.seed + prompt.seed_offset
     ) & cli.MAX_SEEDVR2
@@ -286,7 +354,7 @@ def test_prompt_mode_selects_source_and_ignores_theme_settings(tmp_path):
     file.write_text(
         'prompt-mode = "source"\n'
         'source = "/data/prompts"\n'
-        "watch = 0\n"
+        "reconcile-interval = 0\n"
         'theme = "forest"\n'
         "prompt-count = -1\n"
         "theme-system-prompt = 123\n"
@@ -294,8 +362,8 @@ def test_prompt_mode_selects_source_and_ignores_theme_settings(tmp_path):
     args = parse_args(["--config", str(file)])
 
     assert cli._resolve_input_mode(args) == "source"
-    assert args.source == "/data/prompts"
-    assert args.watch == 0
+    assert args.sources == ["/data/prompts"]
+    assert args.reconcile_interval == 0
 
 
 def test_toml_rejects_cli_only_prompt(tmp_path):
@@ -334,7 +402,7 @@ def test_one_shot_prompt_ignores_queue_only_settings(tmp_path, monkeypatch):
         'prompt-mode = "invalid-but-ignored"\n'
         'theme = "forest"\n'
         "prompt-count = -1\n"
-        "watch = -1\n"
+        "reconcile-interval = -1\n"
         f'output-dir = "{tmp_path / "output"}"\n'
     )
     monkeypatch.setattr(
@@ -352,18 +420,19 @@ def test_one_shot_prompt_ignores_queue_only_settings(tmp_path, monkeypatch):
         (
             'prompt-mode = "source"\n'
             'source = "/data/prompts"\n'
-            "watch = 0\n"
+            "reconcile-interval = 0\n"
             'theme = "ignored theme"\n'
             "prompt-count = -1\n",
             "source",
-            "/data/prompts",
+            ["/data/prompts"],
         ),
         (
             'prompt-mode = "theme"\n'
             'theme = "quiet forest"\n'
             "prompt-count = 1\n"
             "source = 123\n"
-            'watch = "ignored"\n',
+            'reconcile-interval = "ignored"\n'
+            'source-file-regex = "["\n',
             "theme",
             "quiet forest",
         ),
@@ -379,10 +448,10 @@ def test_main_routes_configured_input_mode(
     calls = []
     monkeypatch.setattr(
         cli,
-        "_render_pending",
-        lambda _cfg, source, announce_empty: calls.append(
-            ("source", source, announce_empty)
-        ),
+        "_run_source_queue",
+        lambda _cfg, source, interval, _source_filter: calls.append(
+            ("source", source, interval)
+        ) or 0,
     )
     monkeypatch.setattr(
         cli,
@@ -396,13 +465,16 @@ def test_main_routes_configured_input_mode(
     assert calls[0][:2] == (expected_mode, expected_value)
 
 
-def test_source_mode_polls_by_default(tmp_path):
+def test_source_mode_reconciles_periodically_by_default(tmp_path):
     file = tmp_path / "krea2pipe.toml"
     file.write_text('prompt-mode = "source"\nsource = "/data/prompts"\n')
     args = parse_args(["--config", str(file)])
 
     assert cli._resolve_input_mode(args) == "source"
-    assert args.watch == cli.DEFAULT_SOURCE_WATCH
+    assert (
+        args.reconcile_interval
+        == cli.DEFAULT_SOURCE_RECONCILE_INTERVAL
+    )
     assert args.prompt_count is None
 
 
@@ -413,7 +485,7 @@ def test_theme_mode_runs_continuously_by_default(tmp_path):
 
     assert cli._resolve_input_mode(args) == "theme"
     assert args.prompt_count == 0
-    assert args.watch is None
+    assert args.reconcile_interval is None
 
 
 def test_generation_requires_a_config_file():
@@ -447,7 +519,7 @@ def test_theme_mode_ignores_source_settings(tmp_path):
         'theme = "forest"\n'
         "prompt-count = 1\n"
         "source = 123\n"
-        'watch = "not-a-number"\n'
+        'reconcile-interval = "not-a-number"\n'
     )
     args = parse_args(["--config", str(file)])
 
@@ -467,6 +539,59 @@ def test_theme_system_prompt_is_configurable(tmp_path):
 
     assert cli._resolve_input_mode(args) == "theme"
     assert args.theme_system_prompt == "Write a concise Chinese image prompt."
+
+
+def test_reset_status_cli_clears_source_completion(tmp_path):
+    from krea2pipe import batch
+
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\ntwo\n")
+    output = tmp_path / "output"
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        queue.mark(queue.next_pending())
+
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'prompt-mode = "source"\n'
+        f'sources = ["{source}"]\n'
+        f'output-dir = "{output}"\n'
+    )
+
+    assert main(["--config", str(file), "--reset-status"]) == 0
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        assert queue.counts() == (2, 0, 2)
+
+
+def test_reset_status_cli_clears_theme_completion(tmp_path):
+    from krea2pipe import batch
+    from krea2pipe.prompting import EXPANSION_SYSTEM_PROMPT
+
+    output = tmp_path / "output"
+    seeds = {"base": 1, "usdu": 2, "seedvr2": 3}
+    progress = batch.ThemeProgress(
+        output,
+        "quiet forest",
+        seeds,
+        EXPANSION_SYSTEM_PROMPT,
+    )
+    progress.mark_completed(0)
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        'prompt-mode = "theme"\n'
+        'theme = "quiet forest"\n'
+        f'output-dir = "{output}"\n'
+    )
+
+    assert main(["--config", str(file), "--reset-status"]) == 0
+    restarted = batch.ThemeProgress(
+        output,
+        "quiet forest",
+        seeds,
+        EXPANSION_SYSTEM_PROMPT,
+    )
+    assert restarted.next_index == 0
 
 
 def test_toml_supports_multiple_loras_and_usdu_sampling(tmp_path):

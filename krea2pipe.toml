@@ -8,7 +8,8 @@
 #
 # Only settings for the selected mode are used; the other mode is ignored.
 # For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.
-# Source mode polls every 10 seconds by default; theme mode runs continuously.
+# Source mode uses filesystem events; theme mode runs continuously.
+# A full source reconciliation runs every 300 seconds as a safety net.
 # Relative checkpoint names resolve below the absolute `model-root`.
 # Absolute checkpoint paths also work.
 # Keep this file flat: use these keys rather than TOML [section] tables.
@@ -17,12 +18,21 @@
 # Select source or theme mode; ignored by CLI --prompt
 prompt-mode = "source"
 
-# SOURCE MODE: prompt file or folder; one image is rendered per non-empty line and
-# Completed lines are skipped on restart
-# source = "/data/krea2/prompts"
-# SOURCE MODE ONLY: polling interval; omitted uses 10 seconds, while 0 processes the
-# Current queue and exits
-# watch = 10
+# SOURCE MODE: array of prompt files and folders
+# sources = ["/data/krea2/prompts", "/data/krea2/more-prompts.txt"]
+# SOURCE MODE ONLY: full-scan safety interval; omitted uses 300 seconds, while 0
+# Processes the current queue and exits
+# reconcile-interval = 300
+# SOURCE MODE ONLY: Git-style ignore patterns; ! re-includes
+source-ignore = []
+# SOURCE MODE ONLY: regular expression matched against relative paths
+# source-file-regex = ".*\\.(txt|prompt)$"
+# SOURCE MODE ONLY: regular expression required in prompt text
+# source-prompt-regex = "portrait|landscape"
+# SOURCE MODE ONLY: include files at or after this ISO-8601 time
+# source-modified-after = "2026-01-01T00:00:00Z"
+# SOURCE MODE ONLY: include files before this ISO-8601 time
+# source-modified-before = "2027-01-01T00:00:00Z"
 
 # THEME MODE: use resident Qwen to expand this theme into prompts
 # theme = "A visual theme for Qwen to expand into varied prompts"

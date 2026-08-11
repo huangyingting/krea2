@@ -25,6 +25,8 @@ dependencies = [
     "diffusers>=0.33.1",
     "rotary-embedding-torch>=0.5.3",
     "psutil>=5.9",
+    "watchfiles>=1.1",
+    "pathspec>=0.12",
 ]
 
 [dependency-groups]

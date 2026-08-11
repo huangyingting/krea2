@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from krea2pipe import batch
@@ -62,6 +64,213 @@ def test_progress_distinguishes_files_with_equal_lines(tmp_path):
     progress.mark(first)
     assert first in progress and second not in progress
     assert first.seed_offset != second.seed_offset
+
+
+def test_source_queue_indexes_a_large_tree_incrementally(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    source.mkdir()
+    for file_index in range(100):
+        (source / f"{file_index:03}.txt").write_text(
+            "".join(f"prompt {file_index}-{line}\n" for line in range(100))
+        )
+
+    with batch.SourceQueue(source, output) as queue:
+        assert queue.reconcile() == 100
+        assert queue.counts() == (10_000, 0, 10_000)
+
+        original_open = batch.Path.open
+
+        def reject_prompt_reread(path, *args, **kwargs):
+            if path.suffix == ".txt":
+                raise AssertionError(f"unchanged prompt file was reread: {path}")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(batch.Path, "open", reject_prompt_reread)
+        assert queue.reconcile() == 0
+        assert queue.counts() == (10_000, 0, 10_000)
+
+
+def test_source_queue_combines_files_and_folders(tmp_path):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "a.txt").write_text("alpha\n")
+    file = tmp_path / "standalone.prompt"
+    file.write_text("bravo\n")
+
+    with batch.SourceQueue([folder, file], tmp_path / "output") as queue:
+        queue.reconcile()
+        assert queue.counts() == (2, 0, 2)
+        assert queue.next_pending().text == "alpha"
+
+
+def test_source_queue_accepts_an_explicit_file_with_any_extension(tmp_path):
+    file = tmp_path / "prompts.data"
+    file.write_text("explicit prompt\n")
+
+    with batch.SourceQueue(file, tmp_path / "output") as queue:
+        queue.reconcile()
+        assert queue.counts() == (1, 0, 1)
+
+
+def test_source_queue_applies_gitignore_patterns(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "keep.txt").write_text("keep\n")
+    (source / "draft.txt").write_text("draft\n")
+    archive = source / "archive"
+    archive.mkdir()
+    (archive / "old.txt").write_text("old\n")
+
+    source_filter = batch.SourceFilter(
+        ignore=("archive/", "draft.txt"),
+    )
+    with batch.SourceQueue(source, tmp_path / "output", source_filter) as queue:
+        queue.reconcile()
+        assert queue.counts() == (1, 0, 1)
+        assert queue.next_pending().text == "keep"
+
+
+def test_source_queue_filters_paths_prompts_and_timestamps(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    included = source / "include.data"
+    included.write_text("keep portrait\nskip landscape\n")
+    excluded = source / "exclude.txt"
+    excluded.write_text("keep portrait\n")
+    timestamp = 1_800_000_000
+    os.utime(included, (timestamp, timestamp))
+    os.utime(excluded, (timestamp, timestamp))
+
+    source_filter = batch.SourceFilter(
+        file_regex=r"include\.data$",
+        prompt_regex="portrait",
+        modified_after="2027-01-15T00:00:00Z",
+        modified_before="2027-02-01T00:00:00Z",
+    )
+    with batch.SourceQueue(source, tmp_path / "output", source_filter) as queue:
+        queue.reconcile()
+        assert queue.counts() == (1, 0, 1)
+        assert queue.next_pending().text == "keep portrait"
+
+
+def test_source_filter_rejects_invalid_patterns_and_time_windows():
+    with pytest.raises(ValueError, match="invalid regular expression"):
+        batch.SourceFilter(file_regex="[")
+    with pytest.raises(ValueError, match="must be earlier"):
+        batch.SourceFilter(
+            modified_after="2027-02-01T00:00:00Z",
+            modified_before="2027-01-01T00:00:00Z",
+        )
+
+
+def test_source_queue_indexes_only_appended_lines(tmp_path):
+    source = tmp_path / "prompts.txt"
+    output = tmp_path / "output"
+    source.write_text("one\ntwo\n")
+
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        first = queue.next_pending()
+        queue.mark(first)
+        second = queue.next_pending()
+        queue.mark(second)
+        source.write_text("one\ntwo\nthree\n")
+        assert queue.update_paths({source}) == 1
+        assert queue.counts() == (3, 2, 1)
+        assert queue.next_pending().text == "three"
+
+
+def test_source_queue_reindexes_only_a_changed_file(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    source.mkdir()
+    first = source / "first.txt"
+    second = source / "second.txt"
+    first.write_text("keep\nold\n")
+    second.write_text("untouched\n")
+
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        queue.mark(queue.next_pending())
+        first.write_text("keep\nnew\n")
+        assert queue.update_paths({first}) == 1
+        assert queue.counts() == (3, 1, 2)
+        assert [queue.next_pending().text] == ["new"]
+
+
+def test_source_queue_removes_deleted_pending_files(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    source.mkdir()
+    file = source / "pending.txt"
+    file.write_text("pending\n")
+
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        file.unlink()
+        assert queue.update_paths({file}) == 1
+        assert queue.counts() == (0, 0, 0)
+
+
+def test_source_queue_survives_restart_and_imports_legacy_progress(tmp_path):
+    source = tmp_path / "prompts.txt"
+    output = tmp_path / "output"
+    source.write_text("one\ntwo\n")
+    prompts = list(batch.iter_prompts(source))
+    legacy = batch.Progress(output)
+    legacy.mark(prompts[0])
+
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        assert queue.counts() == (2, 1, 1)
+        queue.mark(queue.next_pending())
+
+    with batch.SourceQueue(source, output) as resumed:
+        resumed.reconcile()
+        assert resumed.counts() == (2, 2, 0)
+
+
+def test_source_queue_reset_clears_active_completion_state(tmp_path):
+    source = tmp_path / "prompts.txt"
+    source.write_text("one\ntwo\n")
+    output = tmp_path / "output"
+
+    with batch.SourceQueue(source, output) as queue:
+        queue.reconcile()
+        queue.mark(queue.next_pending())
+        assert queue.counts() == (2, 1, 1)
+        assert queue.reset() == 1
+        assert queue.counts() == (2, 0, 2)
+
+
+def test_source_watcher_reports_new_prompt_files(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+
+    with batch.SourceWatcher(source) as watcher:
+        file = source / "new.txt"
+        file.write_text("new prompt\n")
+        changed = watcher.wait(5)
+
+    assert file.resolve() in {path.resolve() for path in changed}
+
+
+def test_source_watcher_incrementally_updates_queue(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "output"
+
+    with (
+        batch.SourceQueue(source, output) as queue,
+        batch.SourceWatcher(source) as watcher,
+    ):
+        queue.reconcile()
+        file = source / "new.prompts"
+        file.write_text("new prompt\n")
+        queue.update_paths(watcher.wait(5))
+        assert queue.counts() == (1, 0, 1)
+        assert queue.next_pending().text == "new prompt"
 
 
 def test_seed_offset_is_stable(tmp_path):
@@ -133,3 +342,13 @@ def test_theme_progress_rejects_out_of_order_completion(tmp_path):
     )
     with pytest.raises(ValueError, match="expected 0"):
         progress.mark_completed(1)
+
+
+def test_theme_progress_reset_starts_sequence_over(tmp_path):
+    seeds = {"base": 1, "usdu": 2, "seedvr2": 3}
+    progress = batch.ThemeProgress(tmp_path, "theme", seeds)
+    progress.mark_completed(0)
+    assert progress.reset() == 1
+
+    restarted = batch.ThemeProgress(tmp_path, "theme", seeds)
+    assert restarted.next_index == 0

@@ -9,4 +9,7 @@ dist/
 output/
 
 .krea2pipe-progress.tsv
+.krea2pipe-source.sqlite3
+.krea2pipe-source.sqlite3-shm
+.krea2pipe-source.sqlite3-wal
 *.log

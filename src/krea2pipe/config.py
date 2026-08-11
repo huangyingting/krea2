@@ -2,10 +2,10 @@
 
 A config file is a flat mapping of generation and queue settings, e.g.::
 
-    source     = "/data/prompts"
+    sources = ["/data/prompts", "/data/more-prompts.txt"]
     output-dir = "/data/renders"
-    steps      = 8
-    watch      = 60          # rescan every minute instead of exiting
+    steps = 8
+    reconcile-interval = 300 # safety scan every five minutes
 
 TOML is read with the standard library.  The public CLI only selects this file
 or supplies a one-time prompt.
@@ -32,10 +32,14 @@ __all__ = [
 _TEMPLATE_SKIP = {"help", "config", "generate_config"}
 _TEMPLATE_HIDE = {"lora_name", "lora_strength"}
 _PLACEHOLDERS: dict[str, Any] = {
-    "source": "/data/krea2/prompts",
+    "sources": ["/data/krea2/prompts", "/data/krea2/more-prompts.txt"],
     "theme": "A visual theme for Qwen to expand into varied prompts",
     "prompt_count": 0,
-    "watch": 10,
+    "reconcile_interval": 300,
+    "source_file_regex": r".*\.(txt|prompt)$",
+    "source_prompt_regex": "portrait|landscape",
+    "source_modified_after": "2026-01-01T00:00:00Z",
+    "source_modified_before": "2027-01-01T00:00:00Z",
     "width": 1248,
     "height": 1248,
     "log_file": "/data/krea2/logs/krea2pipe.log",
@@ -77,6 +81,10 @@ def config_options(parser: argparse.ArgumentParser) -> dict[str, str]:
             continue
         options[_canonical_key(action.dest)] = action.dest
         options[_preferred_key(action)] = action.dest
+        if action.dest == "sources":
+            options["source"] = action.dest
+        if action.dest == "reconcile_interval":
+            options["watch"] = action.dest
     return options
 
 
@@ -113,7 +121,8 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "#",
         "# Only settings for the selected mode are used; the other mode is ignored.",
         "# For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.",
-        "# Source mode polls every 10 seconds by default; theme mode runs continuously.",
+        "# Source mode uses filesystem events; theme mode runs continuously.",
+        "# A full source reconciliation runs every 300 seconds as a safety net.",
         "# Relative checkpoint names resolve below the absolute `model-root`.",
         "# Absolute checkpoint paths also work.",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",
@@ -131,7 +140,7 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         title = group.title[:1].upper() + group.title[1:]
         lines.extend(("", f"# --- {title} ---"))
         for action in actions:
-            if action.dest in {"source", "theme"}:
+            if action.dest in {"sources", "theme"}:
                 lines.append("")
             seen.add(action.dest)
             key = _preferred_key(action)
@@ -206,5 +215,10 @@ def load_config(path: str, valid: set[str] | dict[str, str]) -> dict[str, Any]:
         dest = aliases.get(normalized)
         if dest is None:
             raise SystemExit(f"{file}: unknown option '{key}'")
+        if dest in out:
+            raise SystemExit(
+                f"{file}: options '{key}' and another alias configure "
+                f"the same setting '{_canonical_key(dest)}'"
+            )
         out[dest] = value
     return out
