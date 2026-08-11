@@ -67,6 +67,9 @@ _HELP_OVERRIDES = {
     "subdir": "Subdirectory below output-dir; an empty string writes directly to the output root",
     "quality": "JPEG/WebP quality from 1 to 100; PNG ignores this value",
     "save": "Write generated images to disk; source and theme modes require this for resumable completion state",
+    "service_mode": "Run the loopback monitoring and generated-image management API alongside persistent source or theme processing; CLI --prompt and --reset-status do not start it",
+    "api_host": "Numeric loopback IP address for the HTTP API, normally 127.0.0.1; hostnames and non-loopback bindings are rejected",
+    "api_port": "Unused TCP port from 1 to 65535 for the HTTP API",
     "run_usdu": "Run UltimateSDUpscale after base generation",
     "run_color_match": "Run the standalone ColorMatch stage after UltimateSDUpscale",
     "run_seedvr2": "Run the SeedVR2 diffusion upscaler",
@@ -86,7 +89,7 @@ _GROUP_INTROS = {
     ),
     "sampling": (
         "Random seeds are resolved once per process and embedded in every output image.",
-        "File prompts receive stable path/line/content offsets; theme seeds resume from the atomic theme progress file.",
+        "File prompts receive durable source/content identities; theme seeds resume from the atomic theme progress file.",
     ),
     "models": (
         "Model-root must be absolute; individual checkpoint values may be absolute or relative to their category folder.",
@@ -94,6 +97,13 @@ _GROUP_INTROS = {
     "output": (
         "PNG, JPEG, and WebP include the versioned generation manifest and A1111-compatible parameters.",
         "Relative state and output paths resolve from the process working directory, not from the TOML file location.",
+    ),
+    "HTTP service": (
+        "Service mode does not accept prompts; source files and theme configuration remain the only generation inputs.",
+        "The API provides health, runtime status, image listing/download, thumbnails, embedded generation data, and deletion.",
+        "No authentication or TLS is provided, so the server deliberately accepts only numeric loopback IP addresses.",
+        "Source service mode requires a positive reconcile-interval so file watching remains active; a finite theme remains available for image management after reaching prompt-count.",
+        "Thumbnail cache files live under state-dir/thumbnails and never pollute output-dir.",
     ),
     "stages / runtime": (
         "Disabled stages are skipped entirely, including their model validation and loading.",
@@ -182,6 +192,7 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "# Operational state:",
         "#   - Source queue: STATE_DIR/.krea2pipe-source.sqlite3.",
         "#   - Theme progress: STATE_DIR/.krea2pipe-theme-progress.json.",
+        "#   - Thumbnail cache: STATE_DIR/thumbnails/.",
         "#   - WAL NORMAL avoids per-image fsync; abrupt power loss may replay work.",
         "#",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",

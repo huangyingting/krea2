@@ -104,6 +104,8 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     documented = file.read_text().replace("\n# ", " ")
     assert "SOURCE MODE: Git-style glob list where normal entries include" in documented
     assert "relative entries resolve from the process working directory" in documented
+    assert "No authentication or TLS is provided" in documented
+    assert "Source service mode requires a positive reconcile-interval" in documented
     assert "# increase VRAM usage" in file.read_text()
     from krea2pipe.workflow import WorkflowConfig
 
@@ -123,6 +125,9 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["run-seedvr2"] is True
     assert generated["state-dir"] == "state"
     assert generated["output-dir"] == "output"
+    assert generated["service-mode"] is False
+    assert generated["api-host"] == "127.0.0.1"
+    assert generated["api-port"] == 8787
 
     args = parse_args(["--config", str(file)])
     assert args.batch_size == 1
@@ -131,10 +136,60 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert args.run_seedvr2 is True
     assert args.state_dir == "state"
     assert args.output_dir == "output"
+    assert args.service_mode is False
     cfg = config_from_args(args)
     assert 0 <= cfg.seed <= cli.MAX_SEED
     assert 0 <= cfg.usdu_seed <= cli.MAX_SEED
     assert 0 <= cfg.seedvr2.seed <= cli.MAX_SEEDVR2
+
+
+def test_toml_configures_loopback_http_service(tmp_path):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        "service-mode = true\n"
+        'api-host = "127.0.0.2"\n'
+        "api-port = 9876\n"
+    )
+
+    cfg = config_from_args(parse_args(["--config", str(file)]))
+
+    assert cfg.service_mode is True
+    assert cfg.api_host == "127.0.0.2"
+    assert cfg.api_port == 9876
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        ('api-host = "0.0.0.0"\n', "loopback"),
+        ('api-host = "localhost"\n', "loopback"),
+        ("api-port = 0\n", "between 1 and 65535"),
+        ("api-port = 65536\n", "between 1 and 65535"),
+    ],
+)
+def test_http_service_rejects_unsafe_settings(tmp_path, setting, message):
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(setting)
+
+    with pytest.raises(SystemExit, match=message):
+        config_from_args(parse_args(["--config", str(file)]))
+
+
+def test_service_mode_requires_persistent_source_watching(tmp_path):
+    source = tmp_path / "prompts"
+    source.mkdir()
+    file = tmp_path / "krea2pipe.toml"
+    file.write_text(
+        "service-mode = true\n"
+        'prompt-mode = "source"\n'
+        f'sources = ["{source}"]\n'
+        "reconcile-interval = 0\n"
+        f'state-dir = "{tmp_path / "state"}"\n'
+        f'output-dir = "{tmp_path / "output"}"\n'
+    )
+
+    with pytest.raises(SystemExit, match="reconcile-interval greater than zero"):
+        main(["--config", str(file)])
 
 
 def test_generate_config_refuses_to_overwrite(tmp_path):
@@ -297,6 +352,50 @@ def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkey
     assert rendered[0].seedvr2.seed == (
         cfg.seedvr2.seed + prompt.seed_offset
     ) & cli.MAX_SEEDVR2
+
+
+def test_source_render_updates_http_runtime_status(tmp_path, monkeypatch):
+    from krea2pipe import batch
+    from krea2pipe.http_api import RuntimeStatus
+    from krea2pipe.workflow import WorkflowConfig
+
+    source = tmp_path / "prompts.txt"
+    source.write_text("one prompt\n")
+    output = tmp_path / "output"
+    output.mkdir()
+    image = output / "image.jpg"
+    image.write_bytes(b"image")
+    runtime = RuntimeStatus("source")
+    runtime.ready()
+    active = []
+
+    def render(_cfg, status):
+        active.append(status.snapshot())
+        status.progress("[2/6] sampling")
+        return SimpleNamespace(paths=[str(image)])
+
+    monkeypatch.setattr(cli, "_render", render)
+    cfg = WorkflowConfig(
+        state_dir=str(tmp_path / "state"),
+        output_dir=str(output),
+    )
+
+    with batch.SourceQueue(source, cfg.state_dir) as queue:
+        queue.reconcile()
+        assert cli._render_pending(
+            cfg,
+            queue,
+            announce_empty=True,
+            runtime=runtime,
+        ) == 1
+
+    assert active[0]["state"] == "running"
+    assert active[0]["current"]["file"] == str(source.resolve())
+    assert active[0]["current"]["prompt"] == "one prompt"
+    final = runtime.snapshot()
+    assert final["state"] == "idle"
+    assert final["queue"] == {"total": 1, "completed": 1, "pending": 0}
+    assert final["last_outputs"] == [str(image)]
 
 
 def test_theme_mode_resumes_with_saved_seeds(tmp_path, monkeypatch):

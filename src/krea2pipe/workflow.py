@@ -103,6 +103,11 @@ class WorkflowConfig:
     time_format: str = "%Y-%m-%d-%H%M%S"
     save_intermediates: bool = False
 
+    # --- local HTTP service ---
+    service_mode: bool = False
+    api_host: str = "127.0.0.1"
+    api_port: int = 8787
+
     # --- stage toggles / runtime ---
     run_usdu: bool = True
     run_seedvr2: bool = True

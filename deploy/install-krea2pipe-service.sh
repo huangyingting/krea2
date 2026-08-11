@@ -9,6 +9,7 @@ UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 START_SERVICE=1
+UV_VERSION="${UV_VERSION:-0.12.3}"
 
 usage() {
     cat <<'EOF'
@@ -16,7 +17,12 @@ Usage: sudo deploy/install-krea2pipe-service.sh [--no-start]
 
 Installs krea2pipe under /data/krea2 for the azadmin user and installs the
 krea2pipe systemd service. Existing runtime configuration and generated output
-are preserved.
+are preserved. If uv is unavailable, the official Astral standalone installer
+installs it under /data/krea2/bin without modifying shell profiles.
+
+Environment:
+  UV_BIN      Use a specific existing uv executable.
+  UV_VERSION  Bootstrap this uv version when installation is needed (default: 0.12.3).
 EOF
 }
 
@@ -43,25 +49,27 @@ done
 
 [[ "${EUID}" -eq 0 ]] || fail "Run this installer as root, for example with sudo."
 
-for command in getent install rsync runuser systemctl usermod; do
+for command in chmod getent install mktemp rsync runuser sh systemctl usermod; do
     command -v "${command}" >/dev/null || fail "Required command not found: ${command}"
 done
 
-UV_SOURCE="${UV_BIN:-$(command -v uv || true)}"
-if [[ -z "${UV_SOURCE}" && -n "${SUDO_USER:-}" ]]; then
+UV_SOURCE=""
+if [[ -n "${UV_BIN:-}" ]]; then
+    [[ -x "${UV_BIN}" ]] || fail "UV_BIN is not executable: ${UV_BIN}"
+    UV_SOURCE="${UV_BIN}"
+elif [[ -x "${APP_HOME}/bin/uv" ]]; then
+    UV_SOURCE="${APP_HOME}/bin/uv"
+elif command -v uv >/dev/null; then
+    UV_SOURCE="$(command -v uv)"
+elif [[ -n "${SUDO_USER:-}" ]]; then
     sudo_home="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
     if [[ -x "${sudo_home}/.local/bin/uv" ]]; then
         UV_SOURCE="${sudo_home}/.local/bin/uv"
     fi
 fi
-[[ -n "${UV_SOURCE}" && -x "${UV_SOURCE}" ]] || fail "uv is required; install it or set UV_BIN."
 [[ -d "${MODEL_ROOT}" ]] || fail "Model root does not exist: ${MODEL_ROOT}"
 [[ -f "${SOURCE_ROOT}/pyproject.toml" ]] || fail "Run this script from the krea2pipe source tree."
 [[ -f "${SOURCE_ROOT}/uv.lock" ]] || fail "Missing locked dependencies: ${SOURCE_ROOT}/uv.lock"
-
-if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
-    systemctl stop "${SERVICE_NAME}.service"
-fi
 
 getent passwd "${SERVICE_USER}" >/dev/null || fail \
     "Required service user does not exist: ${SERVICE_USER}"
@@ -86,8 +94,45 @@ install -d -m 2770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
 install -d -m 2750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
     "${APP_HOME}/output"
 
-install -m 0755 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
-    "${UV_SOURCE}" "${APP_HOME}/bin/uv"
+if [[ -n "${UV_SOURCE}" ]]; then
+    if [[ "${UV_SOURCE}" != "${APP_HOME}/bin/uv" ]]; then
+        install -m 0755 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
+            "${UV_SOURCE}" "${APP_HOME}/bin/uv"
+    fi
+else
+    [[ "${UV_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail \
+        "UV_VERSION must be a stable semantic version such as 0.12.3"
+    UV_INSTALLER="$(mktemp)"
+    cleanup_uv_installer() {
+        rm -f -- "${UV_INSTALLER}"
+    }
+    trap cleanup_uv_installer EXIT
+    UV_INSTALLER_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"
+    if command -v curl >/dev/null; then
+        curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
+            "${UV_INSTALLER_URL}" -o "${UV_INSTALLER}"
+    elif command -v wget >/dev/null; then
+        wget -qO "${UV_INSTALLER}" "${UV_INSTALLER_URL}"
+    else
+        fail "uv is unavailable and bootstrapping requires curl or wget."
+    fi
+    chmod 0644 "${UV_INSTALLER}"
+    runuser -u "${SERVICE_USER}" -- env \
+        HOME="${APP_HOME}" \
+        UV_UNMANAGED_INSTALL="${APP_HOME}/bin" \
+        UV_NO_MODIFY_PATH=1 \
+        sh "${UV_INSTALLER}"
+    [[ -x "${APP_HOME}/bin/uv" ]] || fail \
+        "Astral's uv installer did not create ${APP_HOME}/bin/uv"
+    cleanup_uv_installer
+    trap - EXIT
+fi
+runuser -u "${SERVICE_USER}" -- "${APP_HOME}/bin/uv" --version
+
+if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+    systemctl stop "${SERVICE_NAME}.service"
+fi
+
 install -m 0644 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
     "${SOURCE_ROOT}/README.md" \
     "${SOURCE_ROOT}/pyproject.toml" \
@@ -117,6 +162,33 @@ if grep -Eq '^[[:space:]]*state-dir[[:space:]]*=' "${CONFIG_PATH}"; then
         "${CONFIG_PATH}"
 else
     printf '\nstate-dir = "/data/krea2/state"\n' >>"${CONFIG_PATH}"
+fi
+if grep -Eq '^[[:space:]]*service-mode[[:space:]]*=' "${CONFIG_PATH}"; then
+    sed -Ei \
+        's|^[[:space:]]*service-mode[[:space:]]*=.*$|service-mode = true|' \
+        "${CONFIG_PATH}"
+else
+    printf '\nservice-mode = true\n' >>"${CONFIG_PATH}"
+fi
+if grep -Eq '^[[:space:]]*api-host[[:space:]]*=' "${CONFIG_PATH}"; then
+    sed -Ei \
+        's|^[[:space:]]*api-host[[:space:]]*=.*$|api-host = "127.0.0.1"|' \
+        "${CONFIG_PATH}"
+else
+    printf '\napi-host = "127.0.0.1"\n' >>"${CONFIG_PATH}"
+fi
+if ! grep -Eq '^[[:space:]]*api-port[[:space:]]*=' "${CONFIG_PATH}"; then
+    printf '\napi-port = 8787\n' >>"${CONFIG_PATH}"
+fi
+if ! grep -Eq \
+    "^[[:space:]]*prompt-mode[[:space:]]*=[[:space:]]*['\"]theme['\"]" \
+    "${CONFIG_PATH}" \
+    && grep -Eq \
+    '^[[:space:]]*(reconcile-interval|watch)[[:space:]]*=[[:space:]]*0([.]0*)?[[:space:]]*(#.*)?$' \
+    "${CONFIG_PATH}"; then
+    sed -Ei \
+        's@^[[:space:]]*(reconcile-interval|watch)[[:space:]]*=.*$@reconcile-interval = 300@' \
+        "${CONFIG_PATH}"
 fi
 chown "${SERVICE_USER}:${SERVICE_GROUP}" "${CONFIG_PATH}"
 chmod 0660 "${CONFIG_PATH}"

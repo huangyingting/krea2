@@ -390,6 +390,92 @@ root, and enables the systemd service. Prompt files placed under
 installer is rerun. Pass `--no-start` to install or update the service without
 starting it.
 
+The installer does not require uv to be installed beforehand. It first reuses,
+in order, an explicit `UV_BIN`, `/data/krea2/bin/uv`, uv from root's `PATH`, or
+the invoking sudo user's `~/.local/bin/uv`. If none exists, it downloads
+Astral's official standalone installer over HTTPS and runs it as `azadmin` with
+`UV_UNMANAGED_INSTALL=/data/krea2/bin` and `UV_NO_MODIFY_PATH=1`. This avoids
+root-owned uv state and does not alter shell profiles. Clean bootstrap requires
+`curl` or `wget`; later redeployments reuse the application-local binary and can
+run without downloading uv again. The bootstrap defaults to uv 0.12.3; override
+only the version when necessary:
+
+```bash
+sudo UV_VERSION=0.12.3 deploy/install-krea2pipe-service.sh
+# Or force a trusted existing executable:
+sudo UV_BIN=/path/to/uv deploy/install-krea2pipe-service.sh
+```
+
+This follows Astral's
+[standalone installation guidance](https://docs.astral.sh/uv/getting-started/installation/)
+and its
+[`UV_UNMANAGED_INSTALL` guidance](https://docs.astral.sh/uv/reference/installer/).
+
+### Local HTTP image API
+
+Service mode is configured with three flat TOML keys:
+
+```toml
+service-mode = true
+api-host = "127.0.0.1"
+api-port = 8787
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `service-mode` | `false` | Run the API alongside source/theme processing. The deployment installer changes this to `true`. CLI `--prompt` and `--reset-status` never start the API. |
+| `api-host` | `"127.0.0.1"` | Numeric loopback IPv4 or IPv6 address. Hostnames and non-loopback addresses are rejected. |
+| `api-port` | `8787` | Unused TCP port from 1 to 65535. The installer preserves an existing custom port. |
+
+There is intentionally no authentication or TLS. Loopback-only binding is
+therefore mandatory; use operating-system access controls or an authenticated
+local proxy if another trust boundary is needed. The API does not accept
+generation prompts: watched files/folders and configured themes remain the only
+inputs. Source service mode requires `reconcile-interval > 0` so watching stays
+active. When a finite theme reaches `prompt-count`, generation becomes idle but
+the API continues running.
+The installer enforces `service-mode = true` and `api-host = "127.0.0.1"`.
+It preserves a configured API port and changes an explicit finite
+`reconcile-interval = 0` (or legacy `watch = 0`) to 300 seconds so the deployed
+source watcher remains persistent.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /health` | Returns HTTP 200 when ready and 503 while starting, degraded, or stopping |
+| `GET /v1/status` | Active mode, worker stage, current source/theme item, queue progress, uptime, and last error |
+| `GET /v1/images?limit=50&cursor=ID` | Newest-first catalog; `limit` defaults to 50 and accepts 1–200 |
+| `GET /v1/images/{id}` | Download the original image |
+| `GET /v1/images/{id}/thumbnail?max_side=512` | Cached WebP thumbnail; defaults to 512 and accepts 1–1024 without upscaling |
+| `GET /v1/images/{id}/generation-data` | Extract the embedded krea2pipe reproducibility manifest as JSON |
+| `DELETE /v1/images/{id}` | Permanently remove the image and cached thumbnails |
+
+```bash
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/v1/status
+curl 'http://127.0.0.1:8787/v1/images?limit=20'
+curl -o thumbnail.webp \
+  'http://127.0.0.1:8787/v1/images/IMAGE_ID/thumbnail?max_side=1024'
+curl http://127.0.0.1:8787/v1/images/IMAGE_ID/generation-data
+curl -X DELETE http://127.0.0.1:8787/v1/images/IMAGE_ID
+```
+
+JSON errors consistently use
+`{"error":{"code":"...","message":"..."}}`. The image-list response contains
+an `images` array and a nullable `next_cursor`; pass that cursor unchanged to
+fetch the next page. Status states are `starting`, `idle`, `running`,
+`degraded`, and `stopping`.
+
+The catalog is derived from complete PNG, JPEG, and WebP files beneath
+`output-dir`, so manual additions and deletions are reflected without a second
+database. Hidden files, unsupported files, unsafe symlinks, and incomplete
+atomic-save temporary files are excluded. Generated thumbnails are cached under
+`state-dir/thumbnails`; deleting `output-dir` while idle remains safe. Image IDs
+are opaque hashes of relative output paths and therefore change if files are
+renamed. A missing manifest returns 404; malformed or unsupported embedded data
+returns 422. Deletion is immediate and irreversible.
+Deleting an image does not reset source/theme completion state, so it will not
+automatically regenerate; use `--reset-status` when regeneration is intended.
+
 `--generate-config` writes `krea2pipe.toml` in the current directory. Pass a
 path to write elsewhere, for example
 `krea2pipe --generate-config /etc/krea2pipe.toml`. The generated file contains
@@ -430,8 +516,8 @@ blend-factor = 0.4
 
 Supported aspect ratios are `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `9:16`,
 `16:9`, and `21:9`. A random seed is chosen when the service starts; prompt
-lines still receive stable offsets during that process, and the resolved seed
-is written to image metadata. LoRAs are merged in listed order and may each
+lines still receive durable source/content identities during that process, and
+the resolved seed is written to image metadata. LoRAs are merged in listed order and may each
 use a different strength. `dtype` controls model compute precision and VRAM;
 `bfloat16` is recommended for the target A100, while `float16` is available
 for hardware compatibility and `float32` mainly for debugging.
@@ -510,6 +596,7 @@ src/krea2pipe/
   blend.py         optional model-upscale / Lanczos / blend stage
   cli.py           `krea2pipe` command line entry point
   batch.py         prompt file/folder queue and persistent resume ledger
+  http_api.py      loopback monitoring and generated-image management API
   config.py        TOML service configuration
   accel.py         transparent backend tuning and regional torch.compile
   pipeline.py      Krea2Pipeline: encode / sample / decode

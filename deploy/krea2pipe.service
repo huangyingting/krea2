@@ -1,5 +1,5 @@
 [Unit]
-Description=Krea2 prompt queue renderer
+Description=Krea2 renderer and local image API
 After=local-fs.target
 ConditionPathExists=/data/krea2/krea2pipe.toml
 StartLimitIntervalSec=300

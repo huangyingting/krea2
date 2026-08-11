@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import os
 import tempfile
@@ -65,6 +66,7 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         ("filename", cfg.filename),
         ("extension", cfg.extension),
         ("time-format", cfg.time_format),
+        ("api-host", cfg.api_host),
         ("device", cfg.device),
         ("SeedVR2 checkpoint", cfg.seedvr2.dit_model),
         ("SeedVR2 VAE", cfg.seedvr2.vae_model),
@@ -105,6 +107,7 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         ("multiple-of", cfg.multiple_of),
         ("quality", cfg.quality),
         ("seed", cfg.seed),
+        ("api-port", cfg.api_port),
     ):
         _integer(value, option)
     for option, value in (
@@ -121,6 +124,7 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         ("run-blend", cfg.run_blend),
         ("save", cfg.save),
         ("save-intermediates", cfg.save_intermediates),
+        ("service-mode", cfg.service_mode),
     ):
         if not isinstance(value, bool):
             raise ValueError(f"{option} must be true or false")
@@ -140,6 +144,14 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         raise ValueError(f"unsupported model dtype {cfg.dtype}")
     if cfg.extension not in {"png", "jpg", "jpeg", "webp"}:
         raise ValueError("extension must be png, jpg, jpeg, or webp")
+    try:
+        api_address = ipaddress.ip_address(cfg.api_host)
+    except ValueError as exc:
+        raise ValueError("api-host must be a loopback IP address") from exc
+    if not api_address.is_loopback:
+        raise ValueError("api-host must be a loopback IP address")
+    if not 1 <= cfg.api_port <= 65535:
+        raise ValueError("api-port must be between 1 and 65535")
     if cfg.sampler_name not in sampling.SAMPLERS:
         raise ValueError(f"unsupported sampler {cfg.sampler_name!r}")
     if cfg.scheduler not in sampling.SCHEDULERS:

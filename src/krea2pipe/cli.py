@@ -20,6 +20,7 @@ import torch
 
 from . import batch, blend, color_match, loaders, sampling
 from .config import config_options, load_config, write_config_template
+from .http_api import HttpApiServer, ImageCatalog, RuntimeStatus
 from .prompting import EXPANSION_SYSTEM_PROMPT
 from .seedvr2 import SeedVR2Config
 from .validation import DeviceConfigurationError, validate_settings
@@ -276,6 +277,14 @@ def build_config_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-save", dest="save", action="store_false",
                    help="do not write files; incompatible with resumable batch/service mode")
 
+    g = p.add_argument_group("HTTP service")
+    g.add_argument("--service-mode", action="store_true",
+                   help="serve the loopback monitoring and image-management API")
+    g.add_argument("--api-host", default=d.api_host,
+                   help="loopback IP address used by the HTTP API")
+    g.add_argument("--api-port", type=int, default=d.api_port,
+                   help="TCP port used by the HTTP API")
+
     g = p.add_argument_group("stages / runtime")
     g.add_argument("--no-usdu", dest="run_usdu", action="store_false",
                    help="skip UltimateSDUpscale")
@@ -412,6 +421,9 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
         extension=args.extension,
         quality=args.quality,
         save_intermediates=args.save_intermediates,
+        service_mode=args.service_mode,
+        api_host=args.api_host,
+        api_port=args.api_port,
         run_usdu=args.run_usdu,
         run_seedvr2=args.run_seedvr2,
         run_blend=args.run_blend,
@@ -441,8 +453,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _render(cfg: WorkflowConfig):
-    result = run_workflow(cfg, progress=lambda m: print(m, flush=True))
+def _render(
+    cfg: WorkflowConfig,
+    runtime: RuntimeStatus | None = None,
+):
+    def report(message: str) -> None:
+        print(message, flush=True)
+        if runtime is not None:
+            runtime.progress(message)
+
+    result = run_workflow(cfg, progress=report)
     for path in result.paths:
         print(path)
     if not result.paths:
@@ -455,6 +475,7 @@ def _render_pending(
     queue: batch.SourceQueue,
     announce_empty: bool = False,
     max_prompts: int | None = None,
+    runtime: RuntimeStatus | None = None,
 ) -> int:
     """Render pending prompts directly from the durable source index."""
     pending: int | None = None
@@ -464,6 +485,8 @@ def _render_pending(
             f"{total} prompts, {done} already rendered, {pending} to go",
             flush=True,
         )
+        if runtime is not None:
+            runtime.set_queue(total=total, completed=done, pending=pending)
     rendered = 0
     while (prompt := queue.next_pending()) is not None:
         rendered += 1
@@ -481,7 +504,7 @@ def _render_pending(
         # Models and compiled graphs are cached process-wide, so everything
         # after the first image skips loading and compilation.
         offset = prompt.seed_offset
-        result = _render(replace(
+        render_cfg = replace(
             cfg,
             prompt=prompt.text,
             seed=(cfg.seed + offset) & MAX_SEED,
@@ -490,10 +513,34 @@ def _render_pending(
                 cfg.seedvr2,
                 seed=(cfg.seedvr2.seed + offset) & MAX_SEEDVR2,
             ),
-        ))
-        if not result.paths:
-            raise RuntimeError(f"no output was saved for {prompt.file}:{prompt.line}")
-        queue.mark(prompt)
+        )
+        if runtime is not None:
+            runtime.begin(
+                {
+                    "source": "file",
+                    "file": str(prompt.file),
+                    "line": prompt.line,
+                    "prompt": prompt.text[:500],
+                }
+            )
+        try:
+            result = (
+                _render(render_cfg, runtime)
+                if runtime is not None
+                else _render(render_cfg)
+            )
+            if not result.paths:
+                raise RuntimeError(
+                    f"no output was saved for {prompt.file}:{prompt.line}"
+                )
+            queue.mark(prompt)
+        except BaseException as exc:
+            if runtime is not None:
+                runtime.fail(exc)
+            raise
+        if runtime is not None:
+            runtime.complete(result.paths)
+            runtime.decrement_pending()
         if max_prompts is not None and rendered >= max_prompts:
             break
     return rendered
@@ -503,6 +550,7 @@ def _run_source_queue(
     cfg: WorkflowConfig,
     source_spec: batch.SourceSpec,
     reconcile_interval: float,
+    runtime: RuntimeStatus | None = None,
 ) -> int:
     """Run an event-driven source queue with periodic full reconciliation."""
     with batch.SourceQueue(
@@ -511,7 +559,7 @@ def _run_source_queue(
     ) as queue:
         if reconcile_interval == 0:
             queue.reconcile()
-            _render_pending(cfg, queue, announce_empty=True)
+            _render_pending(cfg, queue, announce_empty=True, runtime=runtime)
             return 0
 
         try:
@@ -520,12 +568,10 @@ def _run_source_queue(
                 last_reconcile = time.monotonic()
                 announce = True
                 while True:
-                    rendered = _render_pending(
-                        cfg,
-                        queue,
-                        announce_empty=announce,
-                        max_prompts=1,
-                    )
+                    options = {"announce_empty": announce, "max_prompts": 1}
+                    if runtime is not None:
+                        options["runtime"] = runtime
+                    rendered = _render_pending(cfg, queue, **options)
                     announce = False
                     remaining = max(
                         0.1,
@@ -534,8 +580,10 @@ def _run_source_queue(
                     changed_paths = watcher.wait(0 if rendered else remaining)
                     if changed_paths:
                         queue.update_paths(changed_paths)
+                        _update_source_status(queue, runtime)
                     if time.monotonic() - last_reconcile >= reconcile_interval:
                         queue.reconcile()
+                        _update_source_status(queue, runtime)
                         last_reconcile = time.monotonic()
         except batch.SourceWatchError as exc:
             logger.warning(
@@ -543,37 +591,58 @@ def _run_source_queue(
                 exc,
                 reconcile_interval,
             )
-            _run_reconciliation_fallback(cfg, queue, reconcile_interval)
+            _run_reconciliation_fallback(
+                cfg,
+                queue,
+                reconcile_interval,
+                runtime,
+            )
+
+
+def _update_source_status(
+    queue: batch.SourceQueue,
+    runtime: RuntimeStatus | None,
+) -> None:
+    if runtime is None:
+        return
+    total, completed, pending = queue.counts()
+    runtime.set_queue(total=total, completed=completed, pending=pending)
 
 
 def _run_reconciliation_fallback(
     cfg: WorkflowConfig,
     queue: batch.SourceQueue,
     reconcile_interval: float,
+    runtime: RuntimeStatus | None = None,
 ) -> None:
     """Keep reconciliation periodic when filesystem events are unavailable."""
     queue.reconcile()
     last_reconcile = time.monotonic()
     announce = True
     while True:
-        rendered = _render_pending(
-            cfg,
-            queue,
-            announce_empty=announce,
-            max_prompts=1,
-        )
+        options = {"announce_empty": announce, "max_prompts": 1}
+        if runtime is not None:
+            options["runtime"] = runtime
+        rendered = _render_pending(cfg, queue, **options)
         announce = False
         now = time.monotonic()
         if now - last_reconcile >= reconcile_interval:
             queue.reconcile()
+            _update_source_status(queue, runtime)
             last_reconcile = time.monotonic()
         elif not rendered:
             time.sleep(reconcile_interval - (now - last_reconcile))
             queue.reconcile()
+            _update_source_status(queue, runtime)
             last_reconcile = time.monotonic()
 
 
-def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
+def _render_theme(
+    cfg: WorkflowConfig,
+    theme: str,
+    prompt_count: int,
+    runtime: RuntimeStatus | None = None,
+) -> int:
     progress = batch.ThemeProgress(
         cfg.state_dir,
         theme,
@@ -590,13 +659,35 @@ def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
     index = progress.next_index
     target = "unbounded" if prompt_count == 0 else str(prompt_count)
     print(f"theme queue: {index} completed, target {target}", flush=True)
+    if runtime is not None:
+        runtime.set_queue(
+            completed=index,
+            target=None if prompt_count == 0 else prompt_count,
+        )
     rendered = 0
     while prompt_count == 0 or index < prompt_count:
         prompt_seed = (cfg.seed + index) & MAX_SEED
+        if runtime is not None:
+            runtime.begin(
+                {
+                    "source": "theme",
+                    "theme": theme,
+                    "index": index,
+                    "prompt_seed": prompt_seed,
+                },
+                stage="expanding prompt",
+            )
         print(f"=== [theme {index}] expanding prompt (seed {prompt_seed})", flush=True)
-        prompt = expand_theme(cfg, theme, prompt_seed)
+        try:
+            prompt = expand_theme(cfg, theme, prompt_seed)
+        except BaseException as exc:
+            if runtime is not None:
+                runtime.fail(exc)
+            raise
+        if runtime is not None:
+            runtime.set_prompt(prompt)
         print(f"expanded prompt: {prompt}", flush=True)
-        result = _render(replace(
+        render_cfg = replace(
             cfg,
             prompt=prompt,
             prompt_theme=theme,
@@ -608,12 +699,28 @@ def _render_theme(cfg: WorkflowConfig, theme: str, prompt_count: int) -> int:
                 cfg.seedvr2,
                 seed=(cfg.seedvr2.seed + index) & MAX_SEEDVR2,
             ),
-        ))
-        if not result.paths:
-            raise RuntimeError(f"no output was saved for theme prompt {index}")
-        progress.mark_completed(index)
+        )
+        try:
+            result = (
+                _render(render_cfg, runtime)
+                if runtime is not None
+                else _render(render_cfg)
+            )
+            if not result.paths:
+                raise RuntimeError(f"no output was saved for theme prompt {index}")
+            progress.mark_completed(index)
+        except BaseException as exc:
+            if runtime is not None:
+                runtime.fail(exc)
+            raise
         index += 1
         rendered += 1
+        if runtime is not None:
+            runtime.complete(result.paths)
+            runtime.set_queue(
+                completed=index,
+                target=None if prompt_count == 0 else prompt_count,
+            )
     return rendered
 
 
@@ -769,14 +876,40 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("batch mode requires saving so completed lines can be resumed safely")
     if not args.reset_status and mode == "theme" and not cfg.save:
         raise SystemExit("theme mode requires saving so generation can resume safely")
+    if (
+        cfg.service_mode
+        and not args.reset_status
+        and mode == "source"
+        and args.reconcile_interval == 0
+    ):
+        raise SystemExit(
+            "service-mode source processing requires reconcile-interval greater than zero"
+        )
 
     lock = (
         batch.OutputLock(cfg.state_dir)
         if cfg.save or args.reset_status
         else nullcontext()
     )
+    runtime = (
+        RuntimeStatus(mode)
+        if cfg.service_mode and not args.reset_status and mode != "prompt"
+        else None
+    )
+    api = (
+        HttpApiServer(
+            cfg.api_host,
+            cfg.api_port,
+            ImageCatalog(cfg.output_dir, cfg.state_dir),
+            runtime,
+        )
+        if runtime is not None
+        else nullcontext()
+    )
     try:
-        with lock:
+        with lock, api:
+            if runtime is not None:
+                runtime.ready()
             logger.info(
                 "starting device=%s batch-size=%d model-root=%s "
                 "state-dir=%s output-dir=%s",
@@ -792,16 +925,40 @@ def main(argv: list[str] | None = None) -> int:
                 _render(cfg)
                 return 0
             if mode == "theme":
-                _render_theme(cfg, args.theme, args.prompt_count)
+                if runtime is None:
+                    _render_theme(cfg, args.theme, args.prompt_count)
+                else:
+                    _render_theme(
+                        cfg,
+                        args.theme,
+                        args.prompt_count,
+                        runtime,
+                    )
+                if runtime is not None:
+                    while True:
+                        time.sleep(3600)
                 return 0
 
             if source_spec is None:
                 raise RuntimeError("source mode requires a resolved source specification")
-            return _run_source_queue(
-                cfg,
-                source_spec,
-                args.reconcile_interval,
+            result = (
+                _run_source_queue(
+                    cfg,
+                    source_spec,
+                    args.reconcile_interval,
+                    runtime,
+                )
+                if runtime is not None
+                else _run_source_queue(
+                    cfg,
+                    source_spec,
+                    args.reconcile_interval,
+                )
             )
+            if runtime is not None:
+                while True:
+                    time.sleep(3600)
+            return result
     except KeyboardInterrupt:
         logger.warning("interrupted; the active prompt remains pending for the next run")
         return 130

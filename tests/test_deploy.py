@@ -22,11 +22,22 @@ def test_service_installer_provisions_requested_paths():
     assert 'APP_HOME="/data/krea2"' in script
     assert 'MODEL_ROOT="/data/ComfyUI/models"' in script
     assert 'SERVICE_USER="azadmin"' in script
+    assert 'UV_VERSION="${UV_VERSION:-0.12.3}"' in script
+    assert 'elif [[ -x "${APP_HOME}/bin/uv" ]]' in script
     assert '"${sudo_home}/.local/bin/uv"' in script
+    assert "https://astral.sh/uv/${UV_VERSION}/install.sh" in script
+    assert "curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf" in script
+    assert 'wget -qO "${UV_INSTALLER}"' in script
+    assert 'UV_UNMANAGED_INSTALL="${APP_HOME}/bin"' in script
+    assert "UV_NO_MODIFY_PATH=1" in script
     assert 'chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APP_HOME}"' in script
     assert "install -d -m 2770" in script
     assert '"${APP_HOME}/state"' in script
     assert 'state-dir = "/data/krea2/state"' in script
+    assert "service-mode = true" in script
+    assert 'api-host = "127.0.0.1"' in script
+    assert "api-port = 8787" in script
+    assert "reconcile-interval = 300" in script
     assert '"${APP_HOME}/bin/uv" sync' in script
     assert 'sources = ["/data/krea2/prompts/**/*.txt"]' in script
     assert "systemctl enable --now" in script

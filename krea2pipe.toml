@@ -208,6 +208,27 @@ save-intermediates = false
 # completion state
 save = true
 
+# --- HTTP service ---
+# Service mode does not accept prompts; source files and theme configuration remain
+# the only generation inputs.
+# The API provides health, runtime status, image listing/download, thumbnails,
+# embedded generation data, and deletion.
+# No authentication or TLS is provided, so the server deliberately accepts only
+# numeric loopback IP addresses.
+# Source service mode requires a positive reconcile-interval so file watching remains
+# active; a finite theme remains available for image management after reaching prompt-
+# count.
+# Thumbnail cache files live under state-dir/thumbnails and never pollute output-dir.
+#
+# Run the loopback monitoring and generated-image management API alongside source or
+# theme processing; CLI --prompt and --reset-status do not start it
+service-mode = true
+# Numeric loopback IP address for the HTTP API, normally 127.0.0.1; hostnames and non-
+# loopback bindings are rejected
+api-host = "127.0.0.1"
+# Unused TCP port from 1 to 65535 for the HTTP API
+api-port = 8787
+
 # --- Stages / runtime ---
 # Disabled stages are skipped entirely, including their model validation and loading.
 #
