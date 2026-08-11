@@ -50,11 +50,55 @@ _TEMPLATE_DEFAULTS: dict[str, Any] = {
     ],
 }
 _HELP_OVERRIDES = {
-    "save": "write generated images to disk",
-    "run_usdu": "run UltimateSDUpscale",
-    "run_color_match": "run the standalone ColorMatch stage",
-    "run_seedvr2": "run the SeedVR2 upscaler",
-    "run_blend": "run the separate model-upscale/Lanczos/blend stage",
+    "prompt_mode": "Select the active source or theme block; CLI --prompt ignores both",
+    "sources": "SOURCE MODE: mix any number of explicit prompt files and recursive folders; relative paths resolve from the process working directory",
+    "reconcile_interval": "SOURCE MODE ONLY: filesystem events ingest new files immediately; this full metadata scan recovers missed events, and 0 consumes current files then exits",
+    "source_ignore": "SOURCE MODE ONLY: Gitignore-style patterns relative to each source folder; later ! patterns re-include matching paths",
+    "source_file_regex": "SOURCE MODE ONLY: optional regular expression matched against each relative path; setting it also permits nonstandard file extensions",
+    "source_prompt_regex": "SOURCE MODE ONLY: optional regular expression that each non-comment prompt line must match",
+    "source_modified_after": "SOURCE MODE ONLY: inclusive filesystem mtime lower bound in ISO-8601; timestamps without an offset are interpreted as UTC",
+    "source_modified_before": "SOURCE MODE ONLY: exclusive filesystem mtime upper bound in ISO-8601; timestamps without an offset are interpreted as UTC",
+    "theme": "THEME MODE: subject and requirements that resident Qwen expands into image prompts",
+    "theme_system_prompt": "THEME MODE ONLY: editable Qwen expansion instructions; the generated value is Krea 2's official system prompt",
+    "prompt_count": "THEME MODE ONLY: total expansion count; omitted or 0 continues until interrupted, while a positive value is resumable and finite",
+    "batch_size": "Number of independent images generated together for each prompt; larger values increase VRAM usage",
+    "model_root": "Absolute model-library root containing diffusion_models, text_encoders, vae, loras, upscale_models, and SEEDVR2",
+    "loras": "LoRAs under model-root/loras, applied in listed order with independent strengths; use an empty array to disable all LoRAs",
+    "output_dir": "Persistent output root for images, the SQLite source queue, theme progress, and the process lock; relative paths resolve from the working directory",
+    "filename": "Filename template supporting %time, %date, %width, %height, and %counter; collisions are resolved safely",
+    "subdir": "Subdirectory below output-dir; an empty string writes directly to the output root",
+    "quality": "JPEG/WebP quality from 1 to 100; PNG ignores this value",
+    "save": "Write generated images to disk; source and theme modes require this for resumable completion state",
+    "run_usdu": "Run UltimateSDUpscale after base generation",
+    "run_color_match": "Run the standalone ColorMatch stage after UltimateSDUpscale",
+    "run_seedvr2": "Run the SeedVR2 diffusion upscaler",
+    "run_blend": "Run the separate model-upscale/Lanczos blend after SeedVR2",
+    "dtype": "Model compute precision; bfloat16 is recommended for the target A100, float16 improves compatibility, and float32 is for debugging",
+}
+_GROUP_INTROS = {
+    "input mode": (
+        "Only the block selected by prompt-mode is validated and used.",
+        "Source mode stores its queue in output-dir/.krea2pipe-source.sqlite3 using WAL synchronous=NORMAL.",
+        "Use `krea2pipe --config FILE --reset-status` to clear completion state without deleting images.",
+    ),
+    "resolution": (
+        "Width and height override aspect-ratio and megapixels only when both are set.",
+        "Base dimensions are rounded to multiple-of before upscaling.",
+    ),
+    "sampling": (
+        "Random seeds are resolved once per process and embedded in every output image.",
+        "File prompts receive stable path/line/content offsets; theme seeds resume from the atomic theme progress file.",
+    ),
+    "models": (
+        "Model-root must be absolute; individual checkpoint values may be absolute or relative to their category folder.",
+    ),
+    "output": (
+        "PNG, JPEG, and WebP include the versioned generation manifest and A1111-compatible parameters.",
+        "Relative output paths resolve from the process working directory, not from the TOML file location.",
+    ),
+    "stages / runtime": (
+        "Disabled stages are skipped entirely, including their model validation and loading.",
+    ),
 }
 
 
@@ -108,6 +152,12 @@ def _toml_value(value: Any) -> str:
     raise TypeError(f"cannot write {type(value).__name__} as a TOML setting")
 
 
+def _comment_lines(text: object) -> list[str]:
+    value = str(text)
+    value = value[:1].upper() + value[1:]
+    return [f"# {line}" for line in wrap(value, width=84)]
+
+
 def render_config_template(parser: argparse.ArgumentParser) -> str:
     """Return a documented flat TOML file containing every TOML default."""
     lines = [
@@ -123,8 +173,19 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
         "# For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.",
         "# Source mode uses filesystem events; theme mode runs continuously.",
         "# A full source reconciliation runs every 300 seconds as a safety net.",
-        "# Relative checkpoint names resolve below the absolute `model-root`.",
-        "# Absolute checkpoint paths also work.",
+        "#",
+        "# Path resolution:",
+        "#   - Relative source and output paths use the process working directory.",
+        "#   - The TOML file's directory does not affect relative paths.",
+        "#   - Model-root must be absolute; checkpoint names may be relative to it.",
+        "#   - The supplied systemd unit uses WorkingDirectory=/home/azadmin/krea2.",
+        "#",
+        "# Operational state:",
+        "#   - Source queue: OUTPUT_DIR/.krea2pipe-source.sqlite3.",
+        "#   - Theme progress: OUTPUT_DIR/.krea2pipe-theme-progress.json.",
+        "#   - Existing .krea2pipe-progress.tsv files are imported once.",
+        "#   - WAL NORMAL avoids per-image fsync; abrupt power loss may replay work.",
+        "#",
         "# Keep this file flat: use these keys rather than TOML [section] tables.",
     ]
     seen: set[str] = set()
@@ -139,6 +200,11 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
             continue
         title = group.title[:1].upper() + group.title[1:]
         lines.extend(("", f"# --- {title} ---"))
+        introductions = _GROUP_INTROS.get(group.title, ())
+        for introduction in introductions:
+            lines.extend(_comment_lines(introduction))
+        if introductions:
+            lines.append("#")
         for action in actions:
             if action.dest in {"sources", "theme"}:
                 lines.append("")
@@ -146,8 +212,7 @@ def render_config_template(parser: argparse.ArgumentParser) -> str:
             key = _preferred_key(action)
             help_text = _HELP_OVERRIDES.get(action.dest, action.help)
             if help_text and help_text is not argparse.SUPPRESS:
-                for line in wrap(str(help_text), width=84):
-                    lines.append(f"# {line[:1].upper() + line[1:]}")
+                lines.extend(_comment_lines(help_text))
             value = action.default
             if action.dest in _TEMPLATE_DEFAULTS:
                 value = _TEMPLATE_DEFAULTS[action.dest]

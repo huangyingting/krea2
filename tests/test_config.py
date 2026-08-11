@@ -101,13 +101,12 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert "\nprompt = " not in file.read_text()
     assert 'prompt-mode = "source"\n\n# SOURCE MODE' in file.read_text()
     assert "\n\n# THEME MODE" in file.read_text()
-    assert not [
-        line
-        for line in file.read_text().splitlines()
-        if line.startswith("# ")
-        and line[2:3].islower()
-        and " = " not in line
-    ]
+    assert (
+        "# SOURCE MODE: mix any number of explicit prompt files and recursive folders;"
+        in file.read_text()
+    )
+    assert "# paths resolve from the process working directory" in file.read_text()
+    assert "# increase VRAM usage" in file.read_text()
     from krea2pipe.workflow import WorkflowConfig
 
     assert generated["model-root"] == WorkflowConfig().model_root
@@ -655,15 +654,15 @@ def test_toml_controls_color_match_and_blend_modules(tmp_path):
     assert cfg.blend_factor == 0.25
 
 
-def test_service_example_exposes_every_optional_stage():
-    example = Path(__file__).parents[1] / "krea2pipe.example.toml"
-    cfg = config_from_args(parse_args(["--config", str(example)]))
+def test_canonical_config_exposes_every_optional_stage():
+    canonical = Path(__file__).parents[1] / "krea2pipe.toml"
+    cfg = config_from_args(parse_args(["--config", str(canonical)]))
     assert cfg.run_usdu
     assert cfg.run_color_match
     assert cfg.run_seedvr2
     assert cfg.run_blend
-    assert cfg.model_root == "/data/models"
-    assert cfg.seedvr2.model_dir == "/data/models/SEEDVR2"
+    assert cfg.model_root == "/data/ComfyUI/models"
+    assert cfg.seedvr2.model_dir == "/data/ComfyUI/models/SEEDVR2"
     assert cfg.color_match_method == "hm-mkl-hm"
     assert cfg.blend_upscale_model_name == "4xNomosWebPhoto_RealPLKSR.pth"
 

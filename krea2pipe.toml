@@ -10,33 +10,57 @@
 # For a one-time prompt, pass `--prompt` on the CLI to ignore both modes.
 # Source mode uses filesystem events; theme mode runs continuously.
 # A full source reconciliation runs every 300 seconds as a safety net.
-# Relative checkpoint names resolve below the absolute `model-root`.
-# Absolute checkpoint paths also work.
+#
+# Path resolution:
+#   - Relative source and output paths use the process working directory.
+#   - The TOML file's directory does not affect relative paths.
+#   - Model-root must be absolute; checkpoint names may be relative to it.
+#   - The supplied systemd unit uses WorkingDirectory=/home/azadmin/krea2.
+#
+# Operational state:
+#   - Source queue: OUTPUT_DIR/.krea2pipe-source.sqlite3.
+#   - Theme progress: OUTPUT_DIR/.krea2pipe-theme-progress.json.
+#   - Existing .krea2pipe-progress.tsv files are imported once.
+#   - WAL NORMAL avoids per-image fsync; abrupt power loss may replay work.
+#
 # Keep this file flat: use these keys rather than TOML [section] tables.
 
 # --- Input mode ---
-# Select source or theme mode; ignored by CLI --prompt
+# Only the block selected by prompt-mode is validated and used.
+# Source mode stores its queue in output-dir/.krea2pipe-source.sqlite3 using WAL
+# synchronous=NORMAL.
+# Use `krea2pipe --config FILE --reset-status` to clear completion state without
+# deleting images.
+#
+# Select the active source or theme block; CLI --prompt ignores both
 prompt-mode = "source"
 
-# SOURCE MODE: array of prompt files and folders
+# SOURCE MODE: mix any number of explicit prompt files and recursive folders; relative
+# paths resolve from the process working directory
 # sources = ["/data/krea2/prompts", "/data/krea2/more-prompts.txt"]
-# SOURCE MODE ONLY: full-scan safety interval; omitted uses 300 seconds, while 0
-# Processes the current queue and exits
+# SOURCE MODE ONLY: filesystem events ingest new files immediately; this full metadata
+# scan recovers missed events, and 0 consumes current files then exits
 # reconcile-interval = 300
-# SOURCE MODE ONLY: Git-style ignore patterns; ! re-includes
+# SOURCE MODE ONLY: Gitignore-style patterns relative to each source folder; later !
+# patterns re-include matching paths
 source-ignore = []
-# SOURCE MODE ONLY: regular expression matched against relative paths
+# SOURCE MODE ONLY: optional regular expression matched against each relative path;
+# setting it also permits nonstandard file extensions
 # source-file-regex = ".*\\.(txt|prompt)$"
-# SOURCE MODE ONLY: regular expression required in prompt text
+# SOURCE MODE ONLY: optional regular expression that each non-comment prompt line must
+# match
 # source-prompt-regex = "portrait|landscape"
-# SOURCE MODE ONLY: include files at or after this ISO-8601 time
+# SOURCE MODE ONLY: inclusive filesystem mtime lower bound in ISO-8601; timestamps
+# without an offset are interpreted as UTC
 # source-modified-after = "2026-01-01T00:00:00Z"
-# SOURCE MODE ONLY: include files before this ISO-8601 time
+# SOURCE MODE ONLY: exclusive filesystem mtime upper bound in ISO-8601; timestamps
+# without an offset are interpreted as UTC
 # source-modified-before = "2027-01-01T00:00:00Z"
 
-# THEME MODE: use resident Qwen to expand this theme into prompts
+# THEME MODE: subject and requirements that resident Qwen expands into image prompts
 # theme = "A visual theme for Qwen to expand into varied prompts"
-# THEME MODE ONLY: Qwen system instructions used to expand themes
+# THEME MODE ONLY: editable Qwen expansion instructions; the generated value is Krea
+# 2's official system prompt
 theme-system-prompt = '''
 You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt.
 
@@ -57,10 +81,14 @@ Follow these rules strictly:
 7. **Respect Existing Detail:** If the user's prompt is already detailed, lightly polish and finalize rather than heavily expanding — preserve their phrasing and direction.
 8. **Respect the Human Form:** Treat depictions of people with dignity. Assume clothing covers genitals and intimate anatomy.
 9. **Preserve User Medium:** When the user explicitly requests a medium (e.g. "photo of", "photograph of", "illustration of", "painting of", "sketch of", "3D render of"), honor it. Do not pivot to a different medium to avoid difficulty — match the user's stated intent.'''
-# THEME MODE ONLY: prompt limit; omitted or 0 runs continuously
+# THEME MODE ONLY: total expansion count; omitted or 0 continues until interrupted,
+# while a positive value is resumable and finite
 # prompt-count = 0
 
 # --- Resolution ---
+# Width and height override aspect-ratio and megapixels only when both are set.
+# Base dimensions are rounded to multiple-of before upscaling.
+#
 # 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9
 aspect-ratio = "1:1"
 # Approximate base-image area before USDU and SeedVR2 upscaling
@@ -71,10 +99,15 @@ multiple-of = 32
 # width = 1248
 # Exact base height override; set width as well
 # height = 1248
-# Number of independent images generated for each prompt
+# Number of independent images generated together for each prompt; larger values
+# increase VRAM usage
 batch-size = 1
 
 # --- Sampling ---
+# Random seeds are resolved once per process and embedded in every output image.
+# File prompts receive stable path/line/content offsets; theme seeds resume from the
+# atomic theme progress file.
+#
 # Integer seed or 'random' (chosen once at startup)
 seed = "random"
 # Base Krea 2 diffusion steps
@@ -87,8 +120,11 @@ sampler = "euler_ancestral"
 scheduler = "sgm_uniform"
 
 # --- Models ---
-# Absolute root containing diffusion_models, text_encoders, vae, loras,
-# Upscale_models, and SEEDVR2
+# Model-root must be absolute; individual checkpoint values may be absolute or
+# relative to their category folder.
+#
+# Absolute model-library root containing diffusion_models, text_encoders, vae, loras,
+# upscale_models, and SEEDVR2
 model-root = "/data/ComfyUI/models"
 # Krea 2 checkpoint under model-root/diffusion_models
 unet = "moodyKrea2Mix_v50BF16.safetensors"
@@ -96,7 +132,8 @@ unet = "moodyKrea2Mix_v50BF16.safetensors"
 clip = "qwen3vl_4b_bf16.safetensors"
 # Qwen Image VAE under model-root/vae
 vae = "qwen_image_vae.safetensors"
-# LoRAs under model-root/loras; add entries with individual strengths
+# LoRAs under model-root/loras, applied in listed order with independent strengths;
+# use an empty array to disable all LoRAs
 loras = [
   { name = "atmospheric photography.safetensors", strength = 0.6 },
 ]
@@ -120,7 +157,7 @@ usdu-denoise = 0.1
 usdu-mode = "Chess"
 
 # --- ColorMatch ---
-# Run the standalone ColorMatch stage
+# Run the standalone ColorMatch stage after UltimateSDUpscale
 run-color-match = true
 # Color transfer: default, hm, reinhard, mvgd, mkl, hm-mvgd-hm, or hm-mkl-hm
 color-match-method = "hm-mkl-hm"
@@ -140,7 +177,7 @@ seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"
 seedvr2-color-correction = "lab"
 
 # --- Upscale blend ---
-# Run the separate model-upscale/Lanczos/blend stage
+# Run the separate model-upscale/Lanczos blend after SeedVR2
 run-blend = true
 # Model under model-root/upscale_models used only by final blend
 blend-upscale-model = "4xNomosWebPhoto_RealPLKSR.pth"
@@ -150,30 +187,40 @@ blend-factor = 0.4
 blend-mode = "normal"
 
 # --- Output ---
-# Persistent output root; also stores the batch resume ledger
+# PNG, JPEG, and WebP include the versioned generation manifest and A1111-compatible
+# parameters.
+# Relative output paths resolve from the process working directory, not from the TOML
+# file location.
+#
+# Persistent output root for images, the SQLite source queue, theme progress, and the
+# process lock; relative paths resolve from the working directory
 output-dir = "output"
-# Filename template; supports %time, %date, %width, %height, %counter
+# Filename template supporting %time, %date, %width, %height, and %counter; collisions
+# are resolved safely
 filename = "%time"
-# Subdirectory created below output-dir; empty writes to the root
+# Subdirectory below output-dir; an empty string writes directly to the output root
 subdir = "AIKC"
 # Output image format: png, jpg, jpeg, or webp
 extension = "jpg"
-# JPEG/WebP quality from 1 to 100
+# JPEG/WebP quality from 1 to 100; PNG ignores this value
 quality = 100
 # Also write the base / USDU / ColorMatch / SeedVR2 stages
 save-intermediates = false
-# Write generated images to disk
+# Write generated images to disk; source and theme modes require this for resumable
+# completion state
 save = true
 
 # --- Stages / runtime ---
-# Run UltimateSDUpscale
+# Disabled stages are skipped entirely, including their model validation and loading.
+#
+# Run UltimateSDUpscale after base generation
 run-usdu = true
-# Run the SeedVR2 upscaler
+# Run the SeedVR2 diffusion upscaler
 run-seedvr2 = true
 # PyTorch device; use cuda for the supported production path
 device = "cuda"
-# Model compute precision; keep bfloat16 unless debugging or using hardware without
-# Bfloat16 support
+# Model compute precision; bfloat16 is recommended for the target A100, float16
+# improves compatibility, and float32 is for debugging
 dtype = "bfloat16"
 # Minimum severity written to the console and log file
 log-level = "INFO"
