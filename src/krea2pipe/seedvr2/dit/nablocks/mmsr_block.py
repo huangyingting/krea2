@@ -113,9 +113,9 @@ class NaSwinAttention(MMWindowAttention):
         vid_q, txt_q = self.norm_q(vid_q, txt_q)
         vid_k, txt_k = self.norm_k(vid_k, txt_k)
 
-        txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
+        txt_len = cache("txt_len", lambda: na.int_prod(txt_shape, -1))
 
-        vid_len_win = cache_win("vid_len", lambda: window_shape.prod(-1))
+        vid_len_win = cache_win("vid_len", lambda: na.int_prod(window_shape, -1))
         txt_len_win = cache_win("txt_len", lambda: txt_len.repeat_interleave(window_count))
         all_len_win = cache_win("all_len", lambda: vid_len_win + txt_len_win)
         concat_win, unconcat_win = cache_win(
@@ -223,8 +223,8 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
         torch.LongTensor,
     ]:
         hid_len = MMArg(
-            cache("vid_len", lambda: vid_shape.prod(-1)),
-            cache("txt_len", lambda: txt_shape.prod(-1)),
+            cache("vid_len", lambda: na.int_prod(vid_shape, -1)),
+            cache("txt_len", lambda: na.int_prod(txt_shape, -1)),
         )
         ada_kwargs = {
             "emb": emb,

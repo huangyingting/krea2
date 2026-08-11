@@ -18,6 +18,19 @@ import einops
 import torch
 
 
+def int_prod(x: torch.LongTensor, dim: int = -1) -> torch.LongTensor:
+    """Product reduction of an integer tensor along ``dim``.
+
+    ``torch.prod`` on integer CUDA tensors raises ``RuntimeError: CUDA driver
+    error: invalid argument`` on some driver builds (confirmed reproducible
+    even for a plain 2x3 int64 tensor, while the same reduction works for
+    float dtypes and for ``sum``). Route the reduction through float32 and
+    round-trip back to the original dtype/device so results stay in place
+    for downstream GPU arithmetic without hitting the broken kernel.
+    """
+    return x.float().prod(dim).round().to(x.dtype)
+
+
 def flatten(
     hid: List[torch.FloatTensor],  # List of (*** c)
 ) -> Tuple[
@@ -34,7 +47,7 @@ def unflatten(
     hid: torch.FloatTensor,  # (L c) or (L ... c)
     hid_shape: torch.LongTensor,  # (b n)
 ) -> List[torch.Tensor]:  # List of (*** c) or (*** ... c)
-    hid_len = hid_shape.prod(-1)
+    hid_len = int_prod(hid_shape, -1)
     hid = hid.split(hid_len.tolist())
     hid = [x.unflatten(0, s.tolist()) for x, s in zip(hid, hid_shape)]
     return hid
@@ -157,7 +170,7 @@ def rearrange_idx(
     pattern: str,
     **kwargs: Dict[str, int],
 ) -> Tuple[Callable, Callable, torch.LongTensor]:
-    hid_idx = torch.arange(hid_shape.prod(-1).sum(), device=hid_shape.device).unsqueeze(-1)
+    hid_idx = torch.arange(int_prod(hid_shape, -1).sum(), device=hid_shape.device).unsqueeze(-1)
     tgt_idx, tgt_shape = rearrange(hid_idx, hid_shape, pattern, **kwargs)
     tgt_idx = tgt_idx.squeeze(-1)
     src_idx = torch.argsort(tgt_idx)
@@ -229,7 +242,7 @@ def window_idx(
     hid_shape: torch.LongTensor,  # (b n)
     window_fn: Callable[[torch.Tensor], List[torch.Tensor]],
 ):
-    hid_idx = torch.arange(hid_shape.prod(-1).sum(), device=hid_shape.device).unsqueeze(-1)
+    hid_idx = torch.arange(int_prod(hid_shape, -1).sum(), device=hid_shape.device).unsqueeze(-1)
     tgt_idx, tgt_shape, tgt_windows = window(hid_idx, hid_shape, window_fn)
     tgt_idx = tgt_idx.squeeze(-1)
     src_idx = torch.argsort(tgt_idx)
