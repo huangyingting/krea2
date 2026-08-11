@@ -13,21 +13,47 @@
 # // limitations under the License.
 
 from itertools import chain
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+import logging
 import einops
 import torch
+
+logger = logging.getLogger(__name__)
+
+# Cached once per process: whether native ``torch.prod`` works for integer
+# CUDA tensors here. Some driver builds raise ``RuntimeError: CUDA driver
+# error: invalid argument`` for this specific op (confirmed reproducible even
+# on a plain 2x3 int64 tensor, while the same reduction works for float
+# dtypes and for ``sum``), so probe it once and fall back only if needed
+# instead of hardcoding a driver/version check.
+_INT_PROD_NATIVE: Optional[bool] = None
 
 
 def int_prod(x: torch.LongTensor, dim: int = -1) -> torch.LongTensor:
     """Product reduction of an integer tensor along ``dim``.
 
-    ``torch.prod`` on integer CUDA tensors raises ``RuntimeError: CUDA driver
-    error: invalid argument`` on some driver builds (confirmed reproducible
-    even for a plain 2x3 int64 tensor, while the same reduction works for
-    float dtypes and for ``sum``). Route the reduction through float32 and
-    round-trip back to the original dtype/device so results stay in place
-    for downstream GPU arithmetic without hitting the broken kernel.
+    Takes the native (fastest) path whenever it is numerically safe on this
+    hardware, and transparently routes through float32 otherwise. See
+    ``_INT_PROD_NATIVE`` for why the fallback exists.
     """
+    global _INT_PROD_NATIVE
+    if x.device.type != "cuda":
+        return x.prod(dim)
+    if _INT_PROD_NATIVE is None:
+        try:
+            result = x.prod(dim)
+            torch.cuda.synchronize()
+            _INT_PROD_NATIVE = True
+            return result
+        except RuntimeError as exc:
+            logger.debug(
+                "torch.prod unavailable for integer CUDA tensors (%s); "
+                "using float32 fallback",
+                exc,
+            )
+            _INT_PROD_NATIVE = False
+    if _INT_PROD_NATIVE:
+        return x.prod(dim)
     return x.float().prod(dim).round().to(x.dtype)
 
 
