@@ -187,8 +187,8 @@ def validate_settings(cfg: WorkflowConfig) -> None:
         _positive(cfg.seedvr2.resolution, "seedvr2-resolution")
         _positive(cfg.seedvr2.max_resolution, "seedvr2-max-resolution")
         _positive(cfg.seedvr2.sample_steps, "SeedVR2 sample steps")
-        if not 0 <= cfg.seedvr2.seed <= (1 << 64) - 1:
-            raise ValueError("seedvr2-seed must be an unsigned 64-bit integer")
+        if not 0 <= cfg.seedvr2.seed <= (1 << 32) - 1:
+            raise ValueError("seedvr2-seed must be an unsigned 32-bit integer")
         if cfg.seedvr2.color_correction not in {"none", "wavelet", "adain", "lab"}:
             raise ValueError(
                 f"unsupported SeedVR2 color correction {cfg.seedvr2.color_correction!r}"

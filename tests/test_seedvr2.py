@@ -13,8 +13,14 @@ import torch
 
 from krea2pipe.seedvr2 import SeedVR2Config, color_fix
 from krea2pipe.seedvr2.dit.attention import sdpa_varlen_func
+from krea2pipe.seedvr2.seed import set_seed
 from krea2pipe.seedvr2.transforms.na_resize import NaResize
 from krea2pipe.seedvr2.vae.tiling import tiled_decode, tiled_encode
+
+
+def test_seedvr2_seed_rejects_values_numpy_cannot_represent():
+    with pytest.raises(ValueError, match=r"between 0 and 2\*\*32 - 1"):
+        set_seed(1 << 32, same_across_ranks=True)
 
 
 # --- variable length attention (flash-attn replacement) -------------------------------

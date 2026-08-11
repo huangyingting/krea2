@@ -24,7 +24,8 @@ def set_seed(seed: Optional[int], same_across_ranks: bool = False):
     """Function that sets the seed for pseudo-random number generators."""
     if seed is not None:
         seed += get_global_rank() if not same_across_ranks else 0
+        if not 0 <= seed <= (1 << 32) - 1:
+            raise ValueError("SeedVR2 seed must be between 0 and 2**32 - 1")
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-

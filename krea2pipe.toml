@@ -94,7 +94,7 @@ color-match-strength = 0.22
 seedvr2-resolution = 4096
 # long-edge pixel cap used to limit VRAM
 seedvr2-max-resolution = 4096
-# integer seed or 'random' (chosen once at startup)
+# 32-bit integer seed or 'random' (chosen once at startup)
 seedvr2-seed = 1234567892
 # SeedVR2 DiT checkpoint under model-root/SEEDVR2
 seedvr2-model = "seedvr2_ema_7b_fp16.safetensors"

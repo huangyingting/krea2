@@ -30,6 +30,7 @@ from .workflow import (
 
 DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 MAX_SEED = (1 << 64) - 1
+MAX_SEEDVR2 = (1 << 32) - 1
 logger = logging.getLogger(__name__)
 
 
@@ -54,12 +55,16 @@ def _seed_argument(value: str) -> int | str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def _resolve_seed(value: object, option: str) -> int:
+def _resolve_seed(value: object, option: str, max_seed: int = MAX_SEED) -> int:
     try:
         parsed = _seed_value(value)
     except ValueError as exc:
         raise SystemExit(f"{option}: {exc}") from exc
-    return secrets.randbits(64) if parsed == "random" else parsed
+    if parsed == "random":
+        return secrets.randbits(max_seed.bit_length())
+    if parsed > max_seed:
+        raise SystemExit(f"{option}: must be between 0 and {max_seed}")
+    return parsed
 
 
 def _parse_loras(value: object) -> list[tuple[str, float]] | None:
@@ -230,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--seedvr2-max-resolution", type=int, default=d.seedvr2.max_resolution,
                    help="long-edge pixel cap used to limit VRAM")
     g.add_argument("--seedvr2-seed", type=_seed_argument, default=d.seedvr2.seed,
-                   help="integer seed or 'random' (chosen once at startup)")
+                   help="32-bit integer seed or 'random' (chosen once at startup)")
     g.add_argument("--seedvr2-model", default=d.seedvr2.dit_model,
                    help="SeedVR2 DiT checkpoint under model-root/SEEDVR2")
     g.add_argument("--seedvr2-color-correction", default=d.seedvr2.color_correction,
@@ -314,7 +319,7 @@ def config_from_args(args: argparse.Namespace) -> WorkflowConfig:
     seedvr2 = SeedVR2Config(
         dit_model=args.seedvr2_model,
         model_dir=os.path.join(model_root, "SEEDVR2"),
-        seed=_resolve_seed(args.seedvr2_seed, "seedvr2-seed"),
+        seed=_resolve_seed(args.seedvr2_seed, "seedvr2-seed", MAX_SEEDVR2),
         resolution=args.seedvr2_resolution,
         max_resolution=args.seedvr2_max_resolution,
         color_correction=args.seedvr2_color_correction,
@@ -413,7 +418,10 @@ def _render_pending(cfg: WorkflowConfig, source: str, announce_empty: bool = Fal
             prompt=prompt.text,
             seed=(cfg.seed + offset) & MAX_SEED,
             usdu_seed=(cfg.usdu_seed + offset) & MAX_SEED,
-            seedvr2=replace(cfg.seedvr2, seed=(cfg.seedvr2.seed + offset) & MAX_SEED),
+            seedvr2=replace(
+                cfg.seedvr2,
+                seed=(cfg.seedvr2.seed + offset) & MAX_SEEDVR2,
+            ),
         ))
         if not result.paths:
             raise RuntimeError(f"no output was saved for {prompt.file}:{prompt.line}")

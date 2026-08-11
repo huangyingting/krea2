@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import tomllib
 
 import pytest
@@ -113,14 +114,54 @@ def test_toml_accepts_cli_option_aliases(tmp_path):
 
 def test_toml_supports_random_seeds(tmp_path, monkeypatch):
     file = tmp_path / "krea2pipe.toml"
-    file.write_text('seed = "random"\nusdu-seed = "random"\n')
-    values = iter([123, 456])
-    monkeypatch.setattr(cli.secrets, "randbits", lambda _bits: next(values))
+    file.write_text(
+        'seed = "random"\nusdu-seed = "random"\nseedvr2-seed = "random"\n'
+    )
+    values = iter([123, 456, 789])
+    bits = []
+
+    def random_bits(count):
+        bits.append(count)
+        return next(values)
+
+    monkeypatch.setattr(cli.secrets, "randbits", random_bits)
 
     cfg = config_from_args(parse_args(["--config", str(file)]))
 
-    assert cfg.seed == 123
-    assert cfg.usdu_seed == 456
+    assert cfg.seed == 456
+    assert cfg.usdu_seed == 789
+    assert cfg.seedvr2.seed == 123
+    assert bits == [32, 64, 64]
+
+
+def test_seedvr2_rejects_a_seed_above_the_numpy_limit():
+    with pytest.raises(SystemExit, match=r"seedvr2-seed: must be between 0 and 4294967295"):
+        config_from_args(parse_args(["--seedvr2-seed", str(1 << 32)]))
+
+
+def test_batch_prompt_offsets_keep_seedvr2_seed_in_32_bit_range(tmp_path, monkeypatch):
+    from krea2pipe import batch
+    from krea2pipe.seedvr2 import SeedVR2Config
+    from krea2pipe.workflow import WorkflowConfig
+
+    source = tmp_path / "prompts.txt"
+    source.write_text("one prompt\n")
+    prompt = next(batch.iter_prompts(source))
+    rendered = []
+    monkeypatch.setattr(
+        cli,
+        "_render",
+        lambda cfg: rendered.append(cfg) or SimpleNamespace(paths=["image.jpg"]),
+    )
+    cfg = WorkflowConfig(
+        output_dir=str(tmp_path / "output"),
+        seedvr2=SeedVR2Config(seed=cli.MAX_SEEDVR2),
+    )
+
+    assert cli._render_pending(cfg, str(source)) == 1
+    assert rendered[0].seedvr2.seed == (
+        cfg.seedvr2.seed + prompt.seed_offset
+    ) & cli.MAX_SEEDVR2
 
 
 def test_toml_supports_multiple_loras_and_usdu_sampling(tmp_path):
