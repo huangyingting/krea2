@@ -18,7 +18,12 @@ Environment=PYTHONUNBUFFERED=1
 # Cache compiled CUDA kernels across service and machine restarts.
 Environment=TORCHINDUCTOR_CACHE_DIR=/var/cache/krea2pipe/inductor
 CacheDirectory=krea2pipe
+# If the previous run crashed, the Inductor compile cache may contain
+# truncated entries (e.g. EOFError/AttributeError on stale kernels).
+# Purge it before starting again so a bad cache can't wedge restarts.
+ExecStartPre=/bin/sh -c 'if [ -e /var/cache/krea2pipe/.inductor-cache-dirty ]; then rm -rf /var/cache/krea2pipe/inductor/*; rm -f /var/cache/krea2pipe/.inductor-cache-dirty; fi'
 ExecStart=/data/krea2/.venv/bin/krea2pipe --config /data/krea2/krea2pipe.toml
+ExecStopPost=/bin/sh -c 'if [ "$SERVICE_RESULT" != "success" ]; then touch /var/cache/krea2pipe/.inductor-cache-dirty; fi'
 Restart=on-failure
 RestartSec=30
 KillSignal=SIGINT
