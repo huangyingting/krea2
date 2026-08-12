@@ -8,15 +8,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy" / "install-krea2pipe-service.sh"
-UNIT = ROOT / "deploy" / "krea2pipe.service"
-RETRY_UNIT = ROOT / "deploy" / "krea2pipe-retry.service"
-CUDA_PROBE = ROOT / "deploy" / "krea2pipe-wait-for-cuda"
+
+
+def rendered_unit() -> str:
+    result = subprocess.run(
+        [str(INSTALLER), "--print-unit"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
 
 
 def test_service_installer_has_valid_bash_syntax():
     assert INSTALLER.stat().st_mode & 0o111
     subprocess.run(["bash", "-n", str(INSTALLER)], check=True)
-    subprocess.run(["sh", "-n", str(CUDA_PROBE)], check=True)
 
 
 def test_service_installer_provisions_requested_paths():
@@ -40,42 +46,57 @@ def test_service_installer_provisions_requested_paths():
     assert 'UV_UNMANAGED_INSTALL="${APP_HOME}/bin"' in script
     assert "UV_NO_MODIFY_PATH=1" in script
     assert "nvidia-modprobe" in script
+    assert "nvidia-smi" in script
     assert 'chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APP_HOME}"' in script
     assert "install -d -m 2770" in script
     assert '"${APP_HOME}/state"' in script
-    assert 'state-dir = "/data/krea2/state"' in script
-    assert "service-mode = true" in script
-    assert 'api-host = "127.0.0.1"' in script
-    assert "api-port = 8787" in script
+    assert 'set_config_value "state-dir" \'"/data/krea2/state"\'' in script
+    assert 'set_config_value "subdir" \'"%hostname"\'' in script
+    assert 'set_config_value "service-mode" "true"' in script
+    assert 'set_config_value "api-host" \'"127.0.0.1"\'' in script
+    assert 'set_config_value "api-port" "8787"' in script
     assert "reconcile-interval = 300" in script
     assert '"${APP_HOME}/bin/uv" sync' in script
-    assert '"${SOURCE_ROOT}/deploy/krea2pipe-wait-for-cuda"' in script
+    assert 'SERVICE_DRIVER="/usr/local/libexec/krea2pipe-service"' in script
+    assert 'install -m 0755 "${BASH_SOURCE[0]}" "${SERVICE_DRIVER}"' in script
+    assert 'install -m 0644 <(render_unit) "${UNIT_PATH}"' in script
     assert 'sources = ["/data/krea2/prompts/**/*.txt"]' in script
-    assert '"${SOURCE_ROOT}/deploy/krea2pipe-retry.service"' in script
     assert "systemctl enable --now" in script
 
 
-def test_systemd_unit_uses_dedicated_home_and_model_library():
-    unit = UNIT.read_text()
+def test_generated_systemd_unit_has_one_restart_path():
+    unit = rendered_unit()
 
     assert "User=azadmin" in unit
     assert "Group=azadmin" in unit
-    assert "WorkingDirectory=/data/krea2" in unit
-    assert "ExecStart=/data/krea2/.venv/bin/krea2pipe" in unit
-    assert "ReadOnlyPaths=/data/ComfyUI/models" in unit
-    assert "ReadWritePaths=/data/krea2" in unit
-    assert "RequiresMountsFor=/data/krea2 /data/ComfyUI/models" in unit
-    assert "OnFailure=krea2pipe-retry.service" in unit
-    assert "ExecStartPre=+/usr/bin/nvidia-modprobe -u" in unit
-    assert "ExecStartPre=/data/krea2/bin/krea2pipe-wait-for-cuda" in unit
+    assert "ExecStartPre=+/usr/local/libexec/krea2pipe-service --service-preflight" in unit
+    assert "ExecStart=/usr/local/libexec/krea2pipe-service --service-run" in unit
+    assert "ReadOnlyPaths=-/data/ComfyUI/models" in unit
+    assert "ReadWritePaths=-/data/krea2" in unit
+    assert "StartLimitIntervalSec=0" in unit
+    assert "Restart=on-failure" in unit
+    assert "RestartSec=30" in unit
+    assert "TimeoutStartSec=infinity" in unit
+    assert "OnFailure=" not in unit
+    assert "RequiresMountsFor=" not in unit
     assert "NoNewPrivileges=true" in unit
 
 
-def test_systemd_retry_covers_failures_before_service_process_start():
-    unit = RETRY_UNIT.read_text()
+def test_preflight_consolidates_mount_and_cuda_readiness():
+    script = INSTALLER.read_text()
+    preflight = script[script.index("service_preflight()") : script.index("service_run()")]
 
-    assert "PartOf=krea2pipe.service" in unit
-    assert "StartLimitIntervalSec=0" in unit
-    assert "ExecStart=/usr/bin/systemctl start krea2pipe.service" in unit
-    assert "Restart=on-failure" in unit
-    assert "RestartSec=30" in unit
+    assert 'mountpoint --quiet "${DATA_MOUNT}"' in preflight
+    assert "systemctl start data.mount" in preflight
+    assert 'timeout "${PROBE_TIMEOUT}" nvidia-modprobe' in preflight
+    assert 'timeout "${PROBE_TIMEOUT}" nvidia-smi' in preflight
+    assert 'timeout "${PROBE_TIMEOUT}" nvidia-modprobe -u' in preflight
+    assert "-c 'import torch; torch.cuda.init()'" in preflight
+    assert preflight.index("nvidia-smi") < preflight.index("nvidia-modprobe -u")
+    assert 'sleep "${RETRY_INTERVAL}"' in preflight
+
+
+def test_legacy_deployment_assets_are_consolidated():
+    assert not (ROOT / "deploy" / "krea2pipe.service").exists()
+    assert not (ROOT / "deploy" / "krea2pipe-retry.service").exists()
+    assert not (ROOT / "deploy" / "krea2pipe-wait-for-cuda").exists()

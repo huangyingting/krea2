@@ -64,7 +64,7 @@ _HELP_OVERRIDES = {
     "state_dir": "Persistent operational state root containing the SQLite source queue, theme progress, and process lock; keep it separate from disposable image output; relative paths resolve from the working directory",
     "output_dir": "Image output root; it may be removed while the service is idle without losing queue completion state; relative paths resolve from the working directory",
     "filename": "Filename template supporting %time, %date, %width, %height, and %counter; collisions are resolved safely",
-    "subdir": "Subdirectory below output-dir; an empty string writes directly to the output root",
+    "subdir": "Subdirectory below output-dir; supports %hostname; an empty string writes directly to the output root",
     "quality": "JPEG/WebP quality from 1 to 100; PNG ignores this value",
     "save": "Write generated images to disk; source and theme modes require this for resumable completion state",
     "service_mode": "Run the loopback monitoring and generated-image management API alongside persistent source or theme processing; CLI --prompt and --reset-status do not start it",

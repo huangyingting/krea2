@@ -97,7 +97,7 @@ class WorkflowConfig:
     state_dir: str = "state"
     output_dir: str = "output"
     filename: str = "%time"
-    subdir: str = "AIKC"
+    subdir: str = "%hostname"
     extension: str = "jpg"
     quality: int = 100
     time_format: str = "%Y-%m-%d-%H%M%S"

@@ -198,8 +198,9 @@ output-dir = "output"
 # Filename template supporting %time, %date, %width, %height, and %counter; collisions
 # are resolved safely
 filename = "%time"
-# Subdirectory below output-dir; an empty string writes directly to the output root
-subdir = "AIKC"
+# Subdirectory below output-dir; supports %hostname; an empty string writes directly
+# to the output root
+subdir = "%hostname"
 # Output image format: png, jpg, jpeg, or webp
 extension = "jpg"
 # JPEG/WebP quality from 1 to 100; PNG ignores this value

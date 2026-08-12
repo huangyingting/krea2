@@ -288,6 +288,7 @@ sources = [
 batch-size = 2
 state-dir = "/data/krea2/state"
 output-dir = "/data/krea2/output"
+subdir = "%hostname"
 ```
 
 Source mode is an event-driven consumer. Linux filesystem events index newly
@@ -386,24 +387,20 @@ The installer runs the service as `azadmin`, installs the locked environment and
 application under `/data/krea2`, configures `/data/ComfyUI/models` as the model
 root, and enables the systemd service. Prompt files placed under
 `/data/krea2/prompts` are consumed recursively and images are written under
-`/data/krea2/output`. Existing configuration and outputs are preserved when the
-installer is rerun. Pass `--no-start` to install or update the service without
-starting it. The deployment script targets a Debian/Ubuntu systemd host; the
-`azadmin` account and `/data/ComfyUI/models` must already exist.
+`/data/krea2/output/<hostname>`. The portable `%hostname` subdirectory token is
+resolved when each image is saved. Existing configuration and outputs are
+preserved when the installer is rerun. Pass `--no-start` to install or update
+the service without starting it. The deployment script targets a Debian/Ubuntu
+systemd host; the `azadmin` account and `/data/ComfyUI/models` must already
+exist.
 
-Before starting the sandboxed application, the unit runs
-`nvidia-modprobe -u` with privileges to load NVIDIA Unified Virtual Memory and
-create its device nodes. It then retries a PyTorch CUDA initialization probe in
-fresh processes until UVM is usable, covering the short cold-boot interval in
-which the module is loaded but CUDA still reports no devices. Krea2 itself
-remains unprivileged with `NoNewPrivileges=true`.
-
-The unit explicitly waits for the filesystems containing `/data/krea2` and
-`/data/ComfyUI/models`. This includes the `/data` mount when both directories
-live there. If a required mount or its RAID device misses systemd's initial
-boot-time window, `krea2pipe-retry.service` retries the service start every 30
-seconds; each attempt also retries the required mount. A manual
-`systemctl stop krea2pipe` also stops any pending retry.
+The installer is also the service launcher, so deployment, readiness handling,
+and runtime paths stay in one versioned file. Its privileged preflight retries
+the `/data` mount and GPU initialization every 30 seconds without creating a
+service restart storm. It initializes headless GPUs with `nvidia-smi`, loads
+NVIDIA Unified Virtual Memory, and verifies CUDA through the installed PyTorch.
+The renderer then starts as `azadmin` with `NoNewPrivileges=true`; systemd's
+single native restart policy handles later process failures.
 
 For a RAID-backed `/data`, define the array and filesystem persistently in
 `mdadm.conf` and `/etc/fstab`; do not rely on a one-time manual mount. `nofail`
@@ -411,7 +408,7 @@ may be retained so an unavailable data disk does not block the whole machine.
 Verify the dependency and boot result with:
 
 ```bash
-systemctl show krea2pipe -p RequiresMountsFor -p After
+systemctl show krea2pipe -p SubState -p NRestarts -p After
 systemctl status data.mount krea2pipe
 journalctl -b -u data.mount -u krea2pipe
 ```
@@ -584,9 +581,13 @@ store the parameters in EXIF `UserComment` and the JSON manifest in EXIF
 `ImageDescription`. Read the structured manifest directly:
 
 ```python
+import socket
+
 from krea2pipe.metadata import read_generation_manifest
 
-settings = read_generation_manifest("/data/krea2/output/image.png")
+settings = read_generation_manifest(
+    f"/data/krea2/output/{socket.gethostname()}/image.png"
+)
 ```
 
 Machine-local model-root paths are intentionally omitted; absolute checkpoint

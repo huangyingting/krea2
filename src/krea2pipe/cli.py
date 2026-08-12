@@ -266,7 +266,7 @@ def build_config_parser() -> argparse.ArgumentParser:
     g.add_argument("--filename", default=d.filename,
                    help="filename template; supports %time, %date, %width, %height, %counter")
     g.add_argument("--subdir", default=d.subdir,
-                   help="subdirectory created below output-dir; empty writes to the root")
+                   help="subdirectory below output-dir; supports %hostname; empty writes to the root")
     g.add_argument("--extension", default=d.extension,
                    choices=["png", "jpg", "jpeg", "webp"],
                    help="output image format: png, jpg, jpeg, or webp")

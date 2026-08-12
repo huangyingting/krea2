@@ -3,12 +3,15 @@ set -Eeuo pipefail
 
 APP_HOME="/data/krea2"
 MODEL_ROOT="/data/ComfyUI/models"
+DATA_MOUNT="/data"
 SERVICE_NAME="krea2pipe"
 SERVICE_USER="azadmin"
+SERVICE_GROUP="${SERVICE_USER}"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
-RETRY_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}-retry.service"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SERVICE_DRIVER="/usr/local/libexec/krea2pipe-service"
+LEGACY_RETRY_UNIT="/etc/systemd/system/${SERVICE_NAME}-retry.service"
+RETRY_INTERVAL=30
+PROBE_TIMEOUT=30
 START_SERVICE=1
 UV_VERSION="${UV_VERSION:-0.12.3}"
 
@@ -32,6 +35,129 @@ fail() {
     exit 1
 }
 
+service_log() {
+    printf 'krea2pipe preflight: %s\n' "$*" >&2
+}
+
+service_preflight() {
+    [[ "${EUID}" -eq 0 ]] || fail "Service preflight must run as root."
+
+    while true; do
+        if ! mountpoint --quiet "${DATA_MOUNT}"; then
+            service_log "${DATA_MOUNT} is not mounted; retrying data.mount"
+            if timeout "${PROBE_TIMEOUT}" systemctl start data.mount; then
+                continue
+            fi
+        elif [[ ! -x "${APP_HOME}/.venv/bin/python" \
+            || ! -x "${APP_HOME}/.venv/bin/krea2pipe" \
+            || ! -f "${APP_HOME}/krea2pipe.toml" \
+            || ! -d "${MODEL_ROOT}" ]]; then
+            service_log "application, configuration, or models are unavailable"
+        elif ! timeout "${PROBE_TIMEOUT}" nvidia-modprobe >/dev/null 2>&1; then
+            service_log "NVIDIA kernel devices are unavailable"
+        elif ! timeout "${PROBE_TIMEOUT}" nvidia-smi \
+            --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
+            service_log "NVIDIA GPU initialization failed"
+        elif ! timeout "${PROBE_TIMEOUT}" nvidia-modprobe -u >/dev/null 2>&1; then
+            service_log "NVIDIA UVM initialization failed"
+        elif ! timeout "${PROBE_TIMEOUT}" runuser -u "${SERVICE_USER}" -- env \
+            HOME="${APP_HOME}" \
+            "${APP_HOME}/.venv/bin/python" \
+            -c 'import torch; torch.cuda.init()' >/dev/null 2>&1; then
+            service_log "PyTorch CUDA initialization failed"
+        else
+            if [[ -e /var/cache/krea2pipe/.inductor-cache-dirty ]]; then
+                if [[ -d /var/cache/krea2pipe/inductor ]]; then
+                    find /var/cache/krea2pipe/inductor -mindepth 1 -delete
+                fi
+                rm -f /var/cache/krea2pipe/.inductor-cache-dirty
+            fi
+            service_log "data mount and CUDA are ready"
+            return
+        fi
+
+        sleep "${RETRY_INTERVAL}"
+    done
+}
+
+service_run() {
+    cd "${APP_HOME}"
+    exec "${APP_HOME}/.venv/bin/krea2pipe" \
+        --config "${APP_HOME}/krea2pipe.toml"
+}
+
+set_config_value() {
+    local key="$1"
+    local value="$2"
+
+    if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "${CONFIG_PATH}"; then
+        sed -Ei \
+            "s|^[[:space:]]*${key}[[:space:]]*=.*$|${key} = ${value}|" \
+            "${CONFIG_PATH}"
+    else
+        printf '\n%s = %s\n' "${key}" "${value}" >>"${CONFIG_PATH}"
+    fi
+}
+
+render_unit() {
+    cat <<EOF
+[Unit]
+Description=Krea2 renderer and local image API
+After=local-fs.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_GROUP}
+Environment=HOME=${APP_HOME}
+Environment=PYTHONUNBUFFERED=1
+Environment=TORCHINDUCTOR_CACHE_DIR=/var/cache/krea2pipe/inductor
+CacheDirectory=krea2pipe
+ExecStartPre=+${SERVICE_DRIVER} --service-preflight
+ExecStart=${SERVICE_DRIVER} --service-run
+ExecStopPost=/bin/sh -c 'if [ "\$SERVICE_RESULT" != "success" ]; then touch /var/cache/krea2pipe/.inductor-cache-dirty; fi'
+Restart=on-failure
+RestartSec=${RETRY_INTERVAL}
+TimeoutStartSec=infinity
+KillSignal=SIGINT
+TimeoutStopSec=30
+SuccessExitStatus=130 SIGINT
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=-${MODEL_ROOT}
+ReadWritePaths=-${APP_HOME}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+case "${1:-}" in
+    --service-preflight)
+        [[ "$#" -eq 1 ]] || fail "--service-preflight does not accept arguments."
+        service_preflight
+        exit
+        ;;
+    --service-run)
+        [[ "$#" -eq 1 ]] || fail "--service-run does not accept arguments."
+        service_run
+        exit
+        ;;
+    --print-unit)
+        [[ "$#" -eq 1 ]] || fail "--print-unit does not accept arguments."
+        render_unit
+        exit
+        ;;
+esac
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
 for argument in "$@"; do
     case "${argument}" in
         --no-start)
@@ -50,7 +176,8 @@ done
 
 [[ "${EUID}" -eq 0 ]] || fail "Run this installer as root, for example with sudo."
 
-for command in chmod getent grep install mktemp nvidia-modprobe rsync runuser sed sh systemctl usermod; do
+for command in chmod find getent grep install mktemp mountpoint nvidia-modprobe \
+    nvidia-smi rsync runuser sed sh systemctl timeout usermod; do
     command -v "${command}" >/dev/null || fail "Required command not found: ${command}"
 done
 
@@ -163,36 +290,13 @@ if [[ ! -e "${CONFIG_PATH}" ]]; then
     printf '\nsources = ["/data/krea2/prompts/**/*.txt"]\n' >>"${CONFIG_PATH}"
 fi
 
-if grep -Eq '^[[:space:]]*model-root[[:space:]]*=' "${CONFIG_PATH}"; then
-    sed -Ei \
-        's|^[[:space:]]*model-root[[:space:]]*=.*$|model-root = "/data/ComfyUI/models"|' \
-        "${CONFIG_PATH}"
-else
-    printf '\nmodel-root = "/data/ComfyUI/models"\n' >>"${CONFIG_PATH}"
-fi
-if grep -Eq '^[[:space:]]*state-dir[[:space:]]*=' "${CONFIG_PATH}"; then
-    sed -Ei \
-        's|^[[:space:]]*state-dir[[:space:]]*=.*$|state-dir = "/data/krea2/state"|' \
-        "${CONFIG_PATH}"
-else
-    printf '\nstate-dir = "/data/krea2/state"\n' >>"${CONFIG_PATH}"
-fi
-if grep -Eq '^[[:space:]]*service-mode[[:space:]]*=' "${CONFIG_PATH}"; then
-    sed -Ei \
-        's|^[[:space:]]*service-mode[[:space:]]*=.*$|service-mode = true|' \
-        "${CONFIG_PATH}"
-else
-    printf '\nservice-mode = true\n' >>"${CONFIG_PATH}"
-fi
-if grep -Eq '^[[:space:]]*api-host[[:space:]]*=' "${CONFIG_PATH}"; then
-    sed -Ei \
-        's|^[[:space:]]*api-host[[:space:]]*=.*$|api-host = "127.0.0.1"|' \
-        "${CONFIG_PATH}"
-else
-    printf '\napi-host = "127.0.0.1"\n' >>"${CONFIG_PATH}"
-fi
+set_config_value "model-root" '"/data/ComfyUI/models"'
+set_config_value "state-dir" '"/data/krea2/state"'
+set_config_value "subdir" '"%hostname"'
+set_config_value "service-mode" "true"
+set_config_value "api-host" '"127.0.0.1"'
 if ! grep -Eq '^[[:space:]]*api-port[[:space:]]*=' "${CONFIG_PATH}"; then
-    printf '\napi-port = 8787\n' >>"${CONFIG_PATH}"
+    set_config_value "api-port" "8787"
 fi
 if ! grep -Eq \
     "^[[:space:]]*prompt-mode[[:space:]]*=[[:space:]]*['\"]theme['\"]" \
@@ -215,13 +319,14 @@ runuser -u "${SERVICE_USER}" -- env \
         --frozen \
         --no-dev
 
-install -m 0755 \
-    "${SOURCE_ROOT}/deploy/krea2pipe-wait-for-cuda" \
+install -d -m 0755 /usr/local/libexec
+install -m 0755 "${BASH_SOURCE[0]}" "${SERVICE_DRIVER}"
+install -m 0644 <(render_unit) "${UNIT_PATH}"
+rm -f \
+    "${LEGACY_RETRY_UNIT}" \
     "${APP_HOME}/bin/krea2pipe-wait-for-cuda"
-install -m 0644 "${SOURCE_ROOT}/deploy/krea2pipe.service" "${UNIT_PATH}"
-install -m 0644 \
-    "${SOURCE_ROOT}/deploy/krea2pipe-retry.service" "${RETRY_UNIT_PATH}"
 systemctl daemon-reload
+systemctl reset-failed "${SERVICE_NAME}.service"
 
 if [[ "${START_SERVICE}" -eq 1 ]]; then
     systemctl enable --now "${SERVICE_NAME}.service"

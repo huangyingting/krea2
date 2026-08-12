@@ -125,6 +125,7 @@ def test_generate_config_writes_all_defaults_and_round_trips(tmp_path):
     assert generated["run-seedvr2"] is True
     assert generated["state-dir"] == "state"
     assert generated["output-dir"] == "output"
+    assert generated["subdir"] == "%hostname"
     assert generated["service-mode"] is False
     assert generated["api-host"] == "127.0.0.1"
     assert generated["api-port"] == 8787
@@ -808,6 +809,7 @@ def test_canonical_config_exposes_every_optional_stage():
     assert cfg.color_match_method == "hm-mkl-hm"
     assert cfg.blend_upscale_model_name == "4xNomosWebPhoto_RealPLKSR.pth"
     assert cfg.state_dir == "state"
+    assert cfg.subdir == "%hostname"
     assert cfg.service_mode
     assert cfg.api_host == "127.0.0.1"
     assert cfg.api_port == 8787

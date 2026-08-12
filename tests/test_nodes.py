@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -184,12 +186,26 @@ def test_color_match_supports_all_documented_methods(method):
 def test_save_image_tokens_and_batch(tmp_path):
     image = torch.rand(2, 8, 16, 3)
     paths = nodes.save_image(image, str(tmp_path), "%width-%height-%counter",
-                             subdir="AIKC", extension="png")
+                             subdir="renders", extension="png")
     assert len(paths) == 2
     assert paths[0].endswith("16-8-0_00.png")   # batch index suffix
     assert paths[1].endswith("16-8-0_01.png")
     for path in paths:
-        assert "AIKC" in path
+        assert "renders" in path
+
+
+def test_save_image_resolves_hostname_subdirectory(tmp_path, monkeypatch):
+    monkeypatch.setattr(nodes.socket, "gethostname", lambda: "render-node-01")
+
+    (path,) = nodes.save_image(
+        torch.rand(1, 8, 8, 3),
+        str(tmp_path),
+        "host-output",
+        subdir="%hostname",
+        extension="png",
+    )
+
+    assert Path(path).parent == tmp_path / "render-node-01"
 
 
 def test_save_image_jpeg_with_metadata(tmp_path):

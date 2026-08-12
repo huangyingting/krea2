@@ -7,6 +7,7 @@ import logging
 import math
 import operator as op
 import os
+import socket
 import tempfile
 from collections.abc import Mapping
 from datetime import datetime
@@ -148,7 +149,8 @@ def resolve_output_target(
     basename = _sanitize(basename) or "image"
 
     output_root = Path(output_dir).expanduser().resolve()
-    target_dir = (output_root / subdir / directory).resolve()
+    resolved_subdir = subdir.replace("%hostname", socket.gethostname())
+    target_dir = (output_root / resolved_subdir / directory).resolve()
     try:
         target_dir.relative_to(output_root)
     except ValueError as exc:
